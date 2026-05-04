@@ -1,10 +1,13 @@
 package git
 
 import (
+	"encoding/hex"
 	"fmt"
+	"strings"
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/go-git/go-git/v5/storage/memory"
@@ -138,4 +141,91 @@ func DefaultBranch(remoteUrl string, privateKey []byte, password string) (string
 	}
 
 	return defaultBranch, nil
+}
+
+func Add(directory string, path string) error {
+	w, err := openWorktree(directory)
+	if err != nil {
+		return err
+	}
+
+	_, err = w.Add(path)
+	return err
+}
+
+func Remove(directory string, path string) error {
+	w, err := openWorktree(directory)
+	if err != nil {
+		return err
+	}
+
+	_, err = w.Remove(path)
+	return err
+}
+
+func ResetHard(directory string) error {
+	_, w, err := openRepositoryAndWorktree(directory)
+	if err != nil {
+		return err
+	}
+
+	return w.Reset(&git.ResetOptions{Mode: git.HardReset})
+}
+
+func ResetHardTo(directory string, commitHash string) error {
+	_, w, err := openRepositoryAndWorktree(directory)
+	if err != nil {
+		return err
+	}
+
+	commitHash = strings.TrimSpace(commitHash)
+	if len(commitHash) != 40 {
+		return fmt.Errorf("commit hash must be 40 hexadecimal characters")
+	}
+	if _, err := hex.DecodeString(commitHash); err != nil {
+		return fmt.Errorf("invalid commit hash: %w", err)
+	}
+
+	return w.Reset(&git.ResetOptions{
+		Commit: plumbing.NewHash(commitHash),
+		Mode:   git.HardReset,
+	})
+}
+
+func Checkout(directory string, branch string) error {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return fmt.Errorf("branch name is required")
+	}
+
+	r, w, err := openRepositoryAndWorktree(directory)
+	if err != nil {
+		return err
+	}
+
+	branchRef := plumbing.NewBranchReferenceName(branch)
+	if _, err := r.Reference(branchRef, true); err != nil {
+		return err
+	}
+
+	return w.Checkout(&git.CheckoutOptions{Branch: branchRef})
+}
+
+func openWorktree(directory string) (*git.Worktree, error) {
+	_, w, err := openRepositoryAndWorktree(directory)
+	return w, err
+}
+
+func openRepositoryAndWorktree(directory string) (*git.Repository, *git.Worktree, error) {
+	r, err := git.PlainOpen(directory)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	w, err := r.Worktree()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return r, w, nil
 }

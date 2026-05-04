@@ -76,6 +76,62 @@ class GitBindingsAsync {
     if (result.$2 != null) throw Exception(result.$2!);
     return result.$1!;
   }
+
+  Future<void> add(String directory, String path) async {
+    var helperIsolateSendPort = await _helperIsolateSendPort;
+    var requestId = _nextAddRequestId++;
+    var request = _AddRequest(requestId, _libPath, directory, path);
+    var completer = Completer<Exception?>();
+    _addRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    var ex = await completer.future;
+    if (ex != null) throw Exception(ex);
+  }
+
+  Future<void> remove(String directory, String path) async {
+    var helperIsolateSendPort = await _helperIsolateSendPort;
+    var requestId = _nextRemoveRequestId++;
+    var request = _RemoveRequest(requestId, _libPath, directory, path);
+    var completer = Completer<Exception?>();
+    _removeRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    var ex = await completer.future;
+    if (ex != null) throw Exception(ex);
+  }
+
+  Future<void> resetHard(String directory) async {
+    var helperIsolateSendPort = await _helperIsolateSendPort;
+    var requestId = _nextResetHardRequestId++;
+    var request = _ResetHardRequest(requestId, _libPath, directory);
+    var completer = Completer<Exception?>();
+    _resetHardRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    var ex = await completer.future;
+    if (ex != null) throw Exception(ex);
+  }
+
+  Future<void> resetHardTo(String directory, String commitHash) async {
+    var helperIsolateSendPort = await _helperIsolateSendPort;
+    var requestId = _nextResetHardToRequestId++;
+    var request =
+        _ResetHardToRequest(requestId, _libPath, directory, commitHash);
+    var completer = Completer<Exception?>();
+    _resetHardToRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    var ex = await completer.future;
+    if (ex != null) throw Exception(ex);
+  }
+
+  Future<void> checkout(String directory, String branch) async {
+    var helperIsolateSendPort = await _helperIsolateSendPort;
+    var requestId = _nextCheckoutRequestId++;
+    var request = _CheckoutRequest(requestId, _libPath, directory, branch);
+    var completer = Completer<Exception?>();
+    _checkoutRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    var ex = await completer.future;
+    if (ex != null) throw Exception(ex);
+  }
 }
 
 class _CloneRequest {
@@ -154,6 +210,86 @@ class _DefaultBranchResponse {
   const _DefaultBranchResponse(this.id, this.branch, this.exception);
 }
 
+class _AddRequest {
+  final int id;
+  final String? libPath;
+  final String directory;
+  final String path;
+
+  const _AddRequest(this.id, this.libPath, this.directory, this.path);
+}
+
+class _AddResponse {
+  final int id;
+  final Exception? exception;
+
+  const _AddResponse(this.id, this.exception);
+}
+
+class _RemoveRequest {
+  final int id;
+  final String? libPath;
+  final String directory;
+  final String path;
+
+  const _RemoveRequest(this.id, this.libPath, this.directory, this.path);
+}
+
+class _RemoveResponse {
+  final int id;
+  final Exception? exception;
+
+  const _RemoveResponse(this.id, this.exception);
+}
+
+class _ResetHardRequest {
+  final int id;
+  final String? libPath;
+  final String directory;
+
+  const _ResetHardRequest(this.id, this.libPath, this.directory);
+}
+
+class _ResetHardResponse {
+  final int id;
+  final Exception? exception;
+
+  const _ResetHardResponse(this.id, this.exception);
+}
+
+class _ResetHardToRequest {
+  final int id;
+  final String? libPath;
+  final String directory;
+  final String commitHash;
+
+  const _ResetHardToRequest(
+      this.id, this.libPath, this.directory, this.commitHash);
+}
+
+class _ResetHardToResponse {
+  final int id;
+  final Exception? exception;
+
+  const _ResetHardToResponse(this.id, this.exception);
+}
+
+class _CheckoutRequest {
+  final int id;
+  final String? libPath;
+  final String directory;
+  final String branch;
+
+  const _CheckoutRequest(this.id, this.libPath, this.directory, this.branch);
+}
+
+class _CheckoutResponse {
+  final int id;
+  final Exception? exception;
+
+  const _CheckoutResponse(this.id, this.exception);
+}
+
 int _nextCloneRequestId = 0;
 final _cloneRequests = <int, Completer<Exception?>>{};
 
@@ -165,6 +301,21 @@ final _pushRequests = <int, Completer<Exception?>>{};
 
 int _nextDefaultBranchRequestsId = 0;
 final _defaultBranchRequests = <int, Completer<(String?, Exception?)>>{};
+
+int _nextAddRequestId = 0;
+final _addRequests = <int, Completer<Exception?>>{};
+
+int _nextRemoveRequestId = 0;
+final _removeRequests = <int, Completer<Exception?>>{};
+
+int _nextResetHardRequestId = 0;
+final _resetHardRequests = <int, Completer<Exception?>>{};
+
+int _nextResetHardToRequestId = 0;
+final _resetHardToRequests = <int, Completer<Exception?>>{};
+
+int _nextCheckoutRequestId = 0;
+final _checkoutRequests = <int, Completer<Exception?>>{};
 
 Future<SendPort> _helperIsolateSendPort = () async {
   final Completer<SendPort> completer = Completer<SendPort>();
@@ -197,6 +348,36 @@ Future<SendPort> _helperIsolateSendPort = () async {
         final completer = _defaultBranchRequests[data.id]!;
         _defaultBranchRequests.remove(data.id);
         completer.complete((data.branch, data.exception));
+        return;
+      }
+      if (data is _AddResponse) {
+        final completer = _addRequests[data.id]!;
+        _addRequests.remove(data.id);
+        completer.complete(data.exception);
+        return;
+      }
+      if (data is _RemoveResponse) {
+        final completer = _removeRequests[data.id]!;
+        _removeRequests.remove(data.id);
+        completer.complete(data.exception);
+        return;
+      }
+      if (data is _ResetHardResponse) {
+        final completer = _resetHardRequests[data.id]!;
+        _resetHardRequests.remove(data.id);
+        completer.complete(data.exception);
+        return;
+      }
+      if (data is _ResetHardToResponse) {
+        final completer = _resetHardToRequests[data.id]!;
+        _resetHardToRequests.remove(data.id);
+        completer.complete(data.exception);
+        return;
+      }
+      if (data is _CheckoutResponse) {
+        final completer = _checkoutRequests[data.id]!;
+        _checkoutRequests.remove(data.id);
+        completer.complete(data.exception);
         return;
       }
       throw UnsupportedError('Unsupported message type: ${data.runtimeType}');
@@ -246,6 +427,56 @@ Future<SendPort> _helperIsolateSendPort = () async {
             sendPort.send(_DefaultBranchResponse(data.id, branch, null));
           } on Exception catch (e) {
             sendPort.send(_DefaultBranchResponse(data.id, null, e));
+          }
+          return;
+        }
+        if (data is _AddRequest) {
+          try {
+            var repo = GitBindings(data.libPath);
+            repo.add(data.directory, data.path);
+            sendPort.send(_AddResponse(data.id, null));
+          } on Exception catch (e) {
+            sendPort.send(_AddResponse(data.id, e));
+          }
+          return;
+        }
+        if (data is _RemoveRequest) {
+          try {
+            var repo = GitBindings(data.libPath);
+            repo.remove(data.directory, data.path);
+            sendPort.send(_RemoveResponse(data.id, null));
+          } on Exception catch (e) {
+            sendPort.send(_RemoveResponse(data.id, e));
+          }
+          return;
+        }
+        if (data is _ResetHardRequest) {
+          try {
+            var repo = GitBindings(data.libPath);
+            repo.resetHard(data.directory);
+            sendPort.send(_ResetHardResponse(data.id, null));
+          } on Exception catch (e) {
+            sendPort.send(_ResetHardResponse(data.id, e));
+          }
+          return;
+        }
+        if (data is _ResetHardToRequest) {
+          try {
+            var repo = GitBindings(data.libPath);
+            repo.resetHardTo(data.directory, data.commitHash);
+            sendPort.send(_ResetHardToResponse(data.id, null));
+          } on Exception catch (e) {
+            sendPort.send(_ResetHardToResponse(data.id, e));
+          }
+          return;
+        }
+        if (data is _CheckoutRequest) {
+          try {
+            var repo = GitBindings(data.libPath);
+            repo.checkout(data.directory, data.branch);
+            sendPort.send(_CheckoutResponse(data.id, null));
+          } on Exception catch (e) {
+            sendPort.send(_CheckoutResponse(data.id, e));
           }
           return;
         }

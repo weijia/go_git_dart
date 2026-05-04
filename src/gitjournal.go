@@ -52,6 +52,56 @@ func GitDefaultBranch(remoteUrl *C.char, privateKey *C.char, privateKeyLen C.int
 	return nil
 }
 
+//export GitAdd
+func GitAdd(directory *C.char, path *C.char) *C.char {
+	err := git.Add(C.GoString(directory), C.GoString(path))
+	if err != nil {
+		return C.CString(err.Error())
+	}
+
+	return nil
+}
+
+//export GitRemove
+func GitRemove(directory *C.char, path *C.char) *C.char {
+	err := git.Remove(C.GoString(directory), C.GoString(path))
+	if err != nil {
+		return C.CString(err.Error())
+	}
+
+	return nil
+}
+
+//export GitResetHard
+func GitResetHard(directory *C.char) *C.char {
+	err := git.ResetHard(C.GoString(directory))
+	if err != nil {
+		return C.CString(err.Error())
+	}
+
+	return nil
+}
+
+//export GitResetHardTo
+func GitResetHardTo(directory *C.char, commitHash *C.char) *C.char {
+	err := git.ResetHardTo(C.GoString(directory), C.GoString(commitHash))
+	if err != nil {
+		return C.CString(err.Error())
+	}
+
+	return nil
+}
+
+//export GitCheckout
+func GitCheckout(directory *C.char, branch *C.char) *C.char {
+	err := git.Checkout(C.GoString(directory), C.GoString(branch))
+	if err != nil {
+		return C.CString(err.Error())
+	}
+
+	return nil
+}
+
 //export GJGenerateRSAKeys
 func GJGenerateRSAKeys(publicKey **C.char, privateKey **C.char) *C.char {
 	publicKeyVal, privateKeyVal, err := keygen.GenerateRSAKeys()

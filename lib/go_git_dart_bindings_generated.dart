@@ -2191,6 +2191,93 @@ class GoGitDartBindings {
           ffi.Pointer<ffi.Char>,
           ffi.Pointer<ffi.Pointer<ffi.Char>>)>();
 
+  ffi.Pointer<ffi.Char> GitAdd(
+    ffi.Pointer<ffi.Char> directory,
+    ffi.Pointer<ffi.Char> path,
+  ) {
+    return _GitAdd(
+      directory,
+      path,
+    );
+  }
+
+  late final _GitAddPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Pointer<ffi.Char> Function(
+              ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>>('GitAdd');
+  late final _GitAdd = _GitAddPtr.asFunction<
+      ffi.Pointer<ffi.Char> Function(
+          ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>();
+
+  ffi.Pointer<ffi.Char> GitRemove(
+    ffi.Pointer<ffi.Char> directory,
+    ffi.Pointer<ffi.Char> path,
+  ) {
+    return _GitRemove(
+      directory,
+      path,
+    );
+  }
+
+  late final _GitRemovePtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Pointer<ffi.Char> Function(
+              ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>>('GitRemove');
+  late final _GitRemove = _GitRemovePtr.asFunction<
+      ffi.Pointer<ffi.Char> Function(
+          ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>();
+
+  ffi.Pointer<ffi.Char> GitResetHard(
+    ffi.Pointer<ffi.Char> directory,
+  ) {
+    return _GitResetHard(
+      directory,
+    );
+  }
+
+  late final _GitResetHardPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Pointer<ffi.Char> Function(
+              ffi.Pointer<ffi.Char>)>>('GitResetHard');
+  late final _GitResetHard = _GitResetHardPtr.asFunction<
+      ffi.Pointer<ffi.Char> Function(ffi.Pointer<ffi.Char>)>();
+
+  ffi.Pointer<ffi.Char> GitResetHardTo(
+    ffi.Pointer<ffi.Char> directory,
+    ffi.Pointer<ffi.Char> commitHash,
+  ) {
+    return _GitResetHardTo(
+      directory,
+      commitHash,
+    );
+  }
+
+  late final _GitResetHardToPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Pointer<ffi.Char> Function(
+              ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>>('GitResetHardTo');
+  late final _GitResetHardTo = _GitResetHardToPtr.asFunction<
+      ffi.Pointer<ffi.Char> Function(
+          ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>();
+
+  ffi.Pointer<ffi.Char> GitCheckout(
+    ffi.Pointer<ffi.Char> directory,
+    ffi.Pointer<ffi.Char> branch,
+  ) {
+    return _GitCheckout(
+      directory,
+      branch,
+    );
+  }
+
+  late final _GitCheckoutPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Pointer<ffi.Char> Function(
+              ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>>('GitCheckout');
+  late final _GitCheckout = _GitCheckoutPtr.asFunction<
+      ffi.Pointer<ffi.Char> Function(
+          ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>();
+
   ffi.Pointer<ffi.Char> GJGenerateRSAKeys(
     ffi.Pointer<ffi.Pointer<ffi.Char>> publicKey,
     ffi.Pointer<ffi.Pointer<ffi.Char>> privateKey,

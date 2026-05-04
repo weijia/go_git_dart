@@ -177,6 +177,96 @@ class GitBindings {
     return branch;
   }
 
+  void add(String directory, String path) {
+    var repoDir = directory.toNativeUtf8();
+    var repoPath = path.toNativeUtf8();
+
+    var retValue = lib.GitAdd(
+      repoDir.cast<Char>(),
+      repoPath.cast<Char>(),
+    );
+    if (retValue != nullptr) {
+      var err = retValue.cast<Utf8>().toDartString();
+      lib.free(retValue.cast());
+
+      throw Exception("GitAdd failed with error: $err");
+    }
+
+    malloc.free(repoDir);
+    malloc.free(repoPath);
+  }
+
+  void remove(String directory, String path) {
+    var repoDir = directory.toNativeUtf8();
+    var repoPath = path.toNativeUtf8();
+
+    var retValue = lib.GitRemove(
+      repoDir.cast<Char>(),
+      repoPath.cast<Char>(),
+    );
+    if (retValue != nullptr) {
+      var err = retValue.cast<Utf8>().toDartString();
+      lib.free(retValue.cast());
+
+      throw Exception("GitRemove failed with error: $err");
+    }
+
+    malloc.free(repoDir);
+    malloc.free(repoPath);
+  }
+
+  void resetHard(String directory) {
+    var repoDir = directory.toNativeUtf8();
+
+    var retValue = lib.GitResetHard(repoDir.cast<Char>());
+    if (retValue != nullptr) {
+      var err = retValue.cast<Utf8>().toDartString();
+      lib.free(retValue.cast());
+
+      throw Exception("GitResetHard failed with error: $err");
+    }
+
+    malloc.free(repoDir);
+  }
+
+  void resetHardTo(String directory, String commitHash) {
+    var repoDir = directory.toNativeUtf8();
+    var hash = commitHash.toNativeUtf8();
+
+    var retValue = lib.GitResetHardTo(
+      repoDir.cast<Char>(),
+      hash.cast<Char>(),
+    );
+    if (retValue != nullptr) {
+      var err = retValue.cast<Utf8>().toDartString();
+      lib.free(retValue.cast());
+
+      throw Exception("GitResetHardTo failed with error: $err");
+    }
+
+    malloc.free(repoDir);
+    malloc.free(hash);
+  }
+
+  void checkout(String directory, String branch) {
+    var repoDir = directory.toNativeUtf8();
+    var branchName = branch.toNativeUtf8();
+
+    var retValue = lib.GitCheckout(
+      repoDir.cast<Char>(),
+      branchName.cast<Char>(),
+    );
+    if (retValue != nullptr) {
+      var err = retValue.cast<Utf8>().toDartString();
+      lib.free(retValue.cast());
+
+      throw Exception("GitCheckout failed with error: $err");
+    }
+
+    malloc.free(repoDir);
+    malloc.free(branchName);
+  }
+
   (String, String) generateRsaKeys() {
     var outputPublicKey = malloc.allocate<Pointer<Char>>(0);
     var outputPrivateKey = malloc.allocate<Pointer<Char>>(0);
