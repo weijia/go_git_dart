@@ -2127,6 +2127,38 @@ class GoGitDartBindings {
           int,
           ffi.Pointer<ffi.Char>)>();
 
+  ffi.Pointer<ffi.Char> GitPull(
+    ffi.Pointer<ffi.Char> remote,
+    ffi.Pointer<ffi.Char> directory,
+    ffi.Pointer<ffi.Char> privateKey,
+    int privateKeyLen,
+    ffi.Pointer<ffi.Char> password,
+  ) {
+    return _GitPull(
+      remote,
+      directory,
+      privateKey,
+      privateKeyLen,
+      password,
+    );
+  }
+
+  late final _GitPullPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Pointer<ffi.Char> Function(
+              ffi.Pointer<ffi.Char>,
+              ffi.Pointer<ffi.Char>,
+              ffi.Pointer<ffi.Char>,
+              ffi.Int,
+              ffi.Pointer<ffi.Char>)>>('GitPull');
+  late final _GitPull = _GitPullPtr.asFunction<
+      ffi.Pointer<ffi.Char> Function(
+          ffi.Pointer<ffi.Char>,
+          ffi.Pointer<ffi.Char>,
+          ffi.Pointer<ffi.Char>,
+          int,
+          ffi.Pointer<ffi.Char>)>();
+
   ffi.Pointer<ffi.Char> GitPush(
     ffi.Pointer<ffi.Char> remote,
     ffi.Pointer<ffi.Char> directory,
@@ -2277,6 +2309,21 @@ class GoGitDartBindings {
   late final _GitCheckout = _GitCheckoutPtr.asFunction<
       ffi.Pointer<ffi.Char> Function(
           ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>();
+
+  ffi.Pointer<ffi.Char> GitMergeCurrentBranch(
+    ffi.Pointer<ffi.Char> directory,
+  ) {
+    return _GitMergeCurrentBranch(
+      directory,
+    );
+  }
+
+  late final _GitMergeCurrentBranchPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Pointer<ffi.Char> Function(
+              ffi.Pointer<ffi.Char>)>>('GitMergeCurrentBranch');
+  late final _GitMergeCurrentBranch = _GitMergeCurrentBranchPtr.asFunction<
+      ffi.Pointer<ffi.Char> Function(ffi.Pointer<ffi.Char>)>();
 
   ffi.Pointer<ffi.Char> GJGenerateRSAKeys(
     ffi.Pointer<ffi.Pointer<ffi.Char>> publicKey,

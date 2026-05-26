@@ -1,6 +1,7 @@
 package git
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -128,6 +129,67 @@ func TestCheckoutFailsForMissingBranch(t *testing.T) {
 
 	if err := Checkout(dir, "missing"); err == nil {
 		t.Fatal("Checkout() error = nil, want error")
+	}
+}
+
+func TestPullFetchesThenMerges(t *testing.T) {
+	var calls []string
+	fetchFn := func(remote string, directory string, privateKey []byte, password string) error {
+		calls = append(calls, "fetch:"+remote+":"+directory+":"+string(privateKey)+":"+password)
+		return nil
+	}
+	mergeFn := func(directory string) error {
+		calls = append(calls, "merge:"+directory)
+		return nil
+	}
+
+	if err := pull(fetchFn, mergeFn, "origin", "/repo", []byte("pem"), "secret"); err != nil {
+		t.Fatalf("pull() error = %v", err)
+	}
+
+	want := []string{"fetch:origin:/repo:pem:secret", "merge:/repo"}
+	if len(calls) != len(want) {
+		t.Fatalf("calls = %v, want %v", calls, want)
+	}
+	for i := range want {
+		if calls[i] != want[i] {
+			t.Fatalf("calls[%d] = %q, want %q", i, calls[i], want[i])
+		}
+	}
+}
+
+func TestPullReturnsFetchError(t *testing.T) {
+	wantErr := errors.New("fetch failed")
+	fetchFn := func(string, string, []byte, string) error {
+		return wantErr
+	}
+	mergeCalled := false
+	mergeFn := func(string) error {
+		mergeCalled = true
+		return nil
+	}
+
+	err := pull(fetchFn, mergeFn, "origin", "/repo", nil, "")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("pull() error = %v, want %v", err, wantErr)
+	}
+	if mergeCalled {
+		t.Fatal("merge was called after fetch failure")
+	}
+}
+
+func TestPullReturnsMergeError(t *testing.T) {
+	wantErr := errors.New("merge failed")
+	fetchFn := func(string, string, []byte, string) error {
+		return nil
+	}
+	mergeFn := func(string) error {
+		return wantErr
+	}
+
+	err := pull(fetchFn, mergeFn, "origin", "/repo", nil, "")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("pull() error = %v, want %v", err, wantErr)
 	}
 }
 

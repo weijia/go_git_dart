@@ -31,6 +31,16 @@ func GitFetch(remote *C.char, directory *C.char, privateKey *C.char, privateKeyL
 	return nil
 }
 
+//export GitPull
+func GitPull(remote *C.char, directory *C.char, privateKey *C.char, privateKeyLen C.int, password *C.char) *C.char {
+	err := git.Pull(C.GoString(remote), C.GoString(directory), C.GoBytes(unsafe.Pointer(privateKey), privateKeyLen), C.GoString(password))
+	if err != nil {
+		return C.CString(err.Error())
+	}
+
+	return nil
+}
+
 //export GitPush
 func GitPush(remote *C.char, directory *C.char, privateKey *C.char, privateKeyLen C.int, password *C.char) *C.char {
 	err := git.Push(C.GoString(remote), C.GoString(directory), C.GoBytes(unsafe.Pointer(privateKey), privateKeyLen), C.GoString(password))
@@ -95,6 +105,16 @@ func GitResetHardTo(directory *C.char, commitHash *C.char) *C.char {
 //export GitCheckout
 func GitCheckout(directory *C.char, branch *C.char) *C.char {
 	err := git.Checkout(C.GoString(directory), C.GoString(branch))
+	if err != nil {
+		return C.CString(err.Error())
+	}
+
+	return nil
+}
+
+//export GitMergeCurrentBranch
+func GitMergeCurrentBranch(directory *C.char) *C.char {
+	err := git.MergeCurrentBranch(C.GoString(directory))
 	if err != nil {
 		return C.CString(err.Error())
 	}

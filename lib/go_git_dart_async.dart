@@ -43,6 +43,23 @@ class GitBindingsAsync {
     if (ex != null) throw Exception(ex);
   }
 
+  Future<void> pull(
+    String remote,
+    String directory,
+    Uint8List pemBytes,
+    String password,
+  ) async {
+    var helperIsolateSendPort = await _helperIsolateSendPort;
+    var requestId = _nextPullRequestId++;
+    var request = _PullRequest(
+        requestId, _libPath, remote, directory, pemBytes, password);
+    var completer = Completer<Exception?>();
+    _pullRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    var ex = await completer.future;
+    if (ex != null) throw Exception(ex);
+  }
+
   Future<void> push(
     String remote,
     String directory,
@@ -132,6 +149,17 @@ class GitBindingsAsync {
     var ex = await completer.future;
     if (ex != null) throw Exception(ex);
   }
+
+  Future<void> mergeCurrentBranch(String directory) async {
+    var helperIsolateSendPort = await _helperIsolateSendPort;
+    var requestId = _nextMergeCurrentBranchRequestId++;
+    var request = _MergeCurrentBranchRequest(requestId, _libPath, directory);
+    var completer = Completer<Exception?>();
+    _mergeCurrentBranchRequests[requestId] = completer;
+    helperIsolateSendPort.send(request);
+    var ex = await completer.future;
+    if (ex != null) throw Exception(ex);
+  }
 }
 
 class _CloneRequest {
@@ -170,6 +198,25 @@ class _FetchResponse {
   final Exception? exception;
 
   const _FetchResponse(this.id, this.exception);
+}
+
+class _PullRequest {
+  final int id;
+  final String? libPath;
+  final String remote;
+  final String directory;
+  final Uint8List pemBytes;
+  final String password;
+
+  const _PullRequest(this.id, this.libPath, this.remote, this.directory,
+      this.pemBytes, this.password);
+}
+
+class _PullResponse {
+  final int id;
+  final Exception? exception;
+
+  const _PullResponse(this.id, this.exception);
 }
 
 class _PushRequest {
@@ -290,11 +337,29 @@ class _CheckoutResponse {
   const _CheckoutResponse(this.id, this.exception);
 }
 
+class _MergeCurrentBranchRequest {
+  final int id;
+  final String? libPath;
+  final String directory;
+
+  const _MergeCurrentBranchRequest(this.id, this.libPath, this.directory);
+}
+
+class _MergeCurrentBranchResponse {
+  final int id;
+  final Exception? exception;
+
+  const _MergeCurrentBranchResponse(this.id, this.exception);
+}
+
 int _nextCloneRequestId = 0;
 final _cloneRequests = <int, Completer<Exception?>>{};
 
 int _nextFetchRequestId = 0;
 final _fetchRequests = <int, Completer<Exception?>>{};
+
+int _nextPullRequestId = 0;
+final _pullRequests = <int, Completer<Exception?>>{};
 
 int _nextPushRequestId = 0;
 final _pushRequests = <int, Completer<Exception?>>{};
@@ -317,6 +382,9 @@ final _resetHardToRequests = <int, Completer<Exception?>>{};
 int _nextCheckoutRequestId = 0;
 final _checkoutRequests = <int, Completer<Exception?>>{};
 
+int _nextMergeCurrentBranchRequestId = 0;
+final _mergeCurrentBranchRequests = <int, Completer<Exception?>>{};
+
 Future<SendPort> _helperIsolateSendPort = () async {
   final Completer<SendPort> completer = Completer<SendPort>();
 
@@ -335,6 +403,12 @@ Future<SendPort> _helperIsolateSendPort = () async {
       if (data is _FetchResponse) {
         final completer = _fetchRequests[data.id]!;
         _fetchRequests.remove(data.id);
+        completer.complete(data.exception);
+        return;
+      }
+      if (data is _PullResponse) {
+        final completer = _pullRequests[data.id]!;
+        _pullRequests.remove(data.id);
         completer.complete(data.exception);
         return;
       }
@@ -380,6 +454,12 @@ Future<SendPort> _helperIsolateSendPort = () async {
         completer.complete(data.exception);
         return;
       }
+      if (data is _MergeCurrentBranchResponse) {
+        final completer = _mergeCurrentBranchRequests[data.id]!;
+        _mergeCurrentBranchRequests.remove(data.id);
+        completer.complete(data.exception);
+        return;
+      }
       throw UnsupportedError('Unsupported message type: ${data.runtimeType}');
     });
 
@@ -405,6 +485,17 @@ Future<SendPort> _helperIsolateSendPort = () async {
             sendPort.send(_FetchResponse(data.id, null));
           } on Exception catch (e) {
             sendPort.send(_FetchResponse(data.id, e));
+          }
+          return;
+        }
+        if (data is _PullRequest) {
+          try {
+            var repo = GitBindings(data.libPath);
+            repo.pull(
+                data.remote, data.directory, data.pemBytes, data.password);
+            sendPort.send(_PullResponse(data.id, null));
+          } on Exception catch (e) {
+            sendPort.send(_PullResponse(data.id, e));
           }
           return;
         }
@@ -477,6 +568,16 @@ Future<SendPort> _helperIsolateSendPort = () async {
             sendPort.send(_CheckoutResponse(data.id, null));
           } on Exception catch (e) {
             sendPort.send(_CheckoutResponse(data.id, e));
+          }
+          return;
+        }
+        if (data is _MergeCurrentBranchRequest) {
+          try {
+            var repo = GitBindings(data.libPath);
+            repo.mergeCurrentBranch(data.directory);
+            sendPort.send(_MergeCurrentBranchResponse(data.id, null));
+          } on Exception catch (e) {
+            sendPort.send(_MergeCurrentBranchResponse(data.id, e));
           }
           return;
         }

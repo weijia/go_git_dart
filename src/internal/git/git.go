@@ -93,6 +93,25 @@ func Fetch(remote string, directory string, privateKey []byte, password string) 
 	return nil
 }
 
+func Pull(remote string, directory string, privateKey []byte, password string) error {
+	return pull(Fetch, MergeCurrentBranch, remote, directory, privateKey, password)
+}
+
+func pull(
+	fetchFn func(string, string, []byte, string) error,
+	mergeFn func(string) error,
+	remote string,
+	directory string,
+	privateKey []byte,
+	password string,
+) error {
+	if err := fetchFn(remote, directory, privateKey, password); err != nil {
+		return err
+	}
+
+	return mergeFn(directory)
+}
+
 func Push(remote string, directory string, privateKey []byte, password string) error {
 	r, err := git.PlainOpen(directory)
 	if err != nil {

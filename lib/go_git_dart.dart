@@ -103,6 +103,41 @@ class GitBindings {
     malloc.free(pemPassphrase);
   }
 
+  void pull(
+    String remote,
+    String directory,
+    Uint8List pemBytes,
+    String password,
+  ) {
+    var cPemBytes = malloc.allocate<ffi.Uint8>(pemBytes.length);
+    for (var i = 0; i < pemBytes.length; i++) {
+      cPemBytes[i] = pemBytes[i];
+    }
+
+    var remoteName = remote.toNativeUtf8();
+    var cloneDir = directory.toNativeUtf8();
+    var pemPassphrase = password.toNativeUtf8();
+
+    var retValue = lib.GitPull(
+      remoteName.cast<Char>(),
+      cloneDir.cast<Char>(),
+      cPemBytes.cast<Char>(),
+      pemBytes.length,
+      pemPassphrase.cast<Char>(),
+    );
+    if (retValue != nullptr) {
+      var err = retValue.cast<Utf8>().toDartString();
+      lib.free(retValue.cast());
+
+      throw Exception("GitPull failed with error code: $err");
+    }
+
+    malloc.free(cPemBytes);
+    malloc.free(remoteName);
+    malloc.free(cloneDir);
+    malloc.free(pemPassphrase);
+  }
+
   void push(
     String remote,
     String directory,
@@ -265,6 +300,20 @@ class GitBindings {
 
     malloc.free(repoDir);
     malloc.free(branchName);
+  }
+
+  void mergeCurrentBranch(String directory) {
+    var repoDir = directory.toNativeUtf8();
+
+    var retValue = lib.GitMergeCurrentBranch(repoDir.cast<Char>());
+    if (retValue != nullptr) {
+      var err = retValue.cast<Utf8>().toDartString();
+      lib.free(retValue.cast());
+
+      throw Exception("GitMergeCurrentBranch failed with error: $err");
+    }
+
+    malloc.free(repoDir);
   }
 
   (String, String) generateRsaKeys() {
