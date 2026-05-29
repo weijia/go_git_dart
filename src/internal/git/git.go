@@ -3,6 +3,7 @@ package git
 import (
 	"encoding/hex"
 	"fmt"
+	"os"
 	"strings"
 
 	git "github.com/go-git/go-git/v5"
@@ -30,27 +31,113 @@ func buildAuth(url string, privateKey []byte, password string) (transport.AuthMe
 	return publicKeys, nil
 }
 
+// setCoreFileModeFalse opens the repo at directory and sets core.fileMode to false
+// in its local config to avoid "malformed mode" errors on repos with non-standard
+// file permissions (e.g. from Gitee).
+func setCoreFileModeFalse(directory string) error {
+	r, err := git.PlainOpen(directory)
+	if err != nil {
+		return err
+	}
+	cfg, err := r.Config()
+	if err != nil {
+		return err
+	}
+	// Check if core.fileMode is already set to false
+	if val, ok := cfg.Raw.Section("core").Option("filemode"); ok && val == "false" {
+		return nil
+	}
+	cfg.Raw.Section("core").SetOption("filemode", "false")
+	return r.SetConfig(cfg)
+}
+
+// Clone clones a repository. If the initial clone fails (e.g. due to "malformed mode"
+// errors from non-standard file permissions on Gitee), it falls back to cloning
+// as a bare repository, setting core.fileMode=false, then converting to a normal
+// repository with a worktree checkout.
 func Clone(url string, directory string, privateKey []byte, password string) error {
 	auth, err := buildAuth(url, privateKey, password)
 	if err != nil {
 		return err
 	}
 
-	/*
-		progressFile, err := os.OpenFile("/tmp/123.txt", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
-		if err != nil {
-			panic(err)
-		}
-		defer progressFile.Close()
-	*/
-
+	// Try normal clone first
 	_, err = git.PlainClone(directory, false, &git.CloneOptions{
 		Auth: auth,
 		URL:  url,
-		// Progress: progressFile,
+	})
+	if err == nil {
+		// Clone succeeded, set core.fileMode=false for future operations
+		_ = setCoreFileModeFalse(directory)
+		return nil
+	}
+
+	// Normal clone failed - try fallback: bare clone + manual checkout
+	// This handles "malformed mode" errors from repos with non-standard permissions
+	errStr := err.Error()
+	if !strings.Contains(errStr, "malformed") && !strings.Contains(errStr, "filemode") && !strings.Contains(errStr, "mode") {
+		// Not a mode-related error, return original error
+		return err
+	}
+
+	// Clean up any partially created directory
+	os.RemoveAll(directory)
+
+	// Step 1: Clone as bare repository (no checkout, so no mode issues)
+	repo, err := git.PlainClone(directory, true, &git.CloneOptions{
+		Auth: auth,
+		URL:  url,
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("bare clone failed: %w", err)
+	}
+
+	// Step 2: Set core.fileMode=false before checkout
+	if err := setCoreFileModeFalse(directory); err != nil {
+		return fmt.Errorf("failed to set core.fileMode=false: %w", err)
+	}
+
+	// Step 3: Convert from bare to non-bare by adding a worktree
+	// go-git doesn't have a direct "unbare" function, so we use Worktree checkout
+	wt, err := repo.Worktree()
+	if err == nil {
+		// If we can get a worktree, the repo is already non-bare (shouldn't happen)
+		return nil
+	}
+
+	// For bare repos, we need to re-open as non-bare.
+	// go-git requires us to write the config to set bare = false
+	cfg, err := repo.Config()
+	if err != nil {
+		return fmt.Errorf("failed to read config: %w", err)
+	}
+	cfg.Core.IsBare = false
+	if err := repo.SetConfig(cfg); err != nil {
+		return fmt.Errorf("failed to set bare=false: %w", err)
+	}
+
+	// Now open as non-bare and checkout
+	repo2, err := git.PlainOpen(directory)
+	if err != nil {
+		return fmt.Errorf("failed to reopen repo: %w", err)
+	}
+
+	wt, err = repo2.Worktree()
+	if err != nil {
+		return fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	// Get HEAD reference for checkout
+	head, err := repo2.Head()
+	if err != nil {
+		return fmt.Errorf("failed to get HEAD: %w", err)
+	}
+
+	err = wt.Checkout(&git.CheckoutOptions{
+		Hash: head.Hash(),
+	})
+	if err != nil {
+		return fmt.Errorf("checkout failed: %w", err)
 	}
 
 	return nil
