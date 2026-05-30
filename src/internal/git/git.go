@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -52,10 +53,10 @@ func setCoreFileModeFalse(directory string) error {
 
 // Clone clones a repository. If the initial clone fails (e.g. due to "malformed mode"
 // errors from non-standard file permissions on Gitee), it falls back to:
-// 1. Clone to a temporary directory (bare, no checkout)
-// 2. Set core.fileMode=false in the config
-// 3. Convert to non-bare and checkout the worktree
-// 4. Move to the final destination
+// 1. Create a new non-bare git repo in target directory
+// 2. Fetch from remote
+// 3. Set core.fileMode=false
+// 4. Checkout files with force mode to ignore permission errors
 func Clone(url string, directory string, privateKey []byte, password string) error {
 	auth, err := buildAuth(url, privateKey, password)
 	if err != nil {
@@ -90,116 +91,135 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 		return err
 	}
 
-	log.Printf("[go_git_dart] Clone: detected mode error, trying bare clone fallback...")
+	log.Printf("[go_git_dart] Clone: detected mode error, trying manual init + fetch fallback...")
 
 	// Clean up any partially created directory
 	os.RemoveAll(directory)
 
-	// Use a temporary directory for the bare clone
-	tmpDir := directory + ".tmp_clone"
-	os.RemoveAll(tmpDir)
+	// Use git's native error handling for permission issues
+	// by using exec.Command to run git commands directly
+	return cloneWithGitCommand(url, directory, privateKey, password)
+}
 
-	// Step 1: Clone as bare repository (no checkout, so no mode issues)
-	log.Printf("[go_git_dart] Clone: bare cloning to %s", tmpDir)
-	repo, err := git.PlainClone(tmpDir, true, &git.CloneOptions{
-		Auth: auth,
-		URL:  url,
-	})
-	if err != nil {
-		os.RemoveAll(tmpDir)
-		return fmt.Errorf("bare clone failed: %w", err)
+// cloneWithGitCommand uses git command line to clone, bypassing go-git's checkout issues
+func cloneWithGitCommand(url, directory string, privateKey []byte, password string) error {
+	// First init a repo
+	log.Printf("[go_git_dart] Clone: git init %s", directory)
+	if err := runGit("init", directory); err != nil {
+		return fmt.Errorf("git init failed: %w", err)
 	}
 
-	// Step 2: Set core.fileMode=false and convert to non-bare
-	log.Printf("[go_git_dart] Clone: setting core.fileMode=false and converting to non-bare")
-	cfg, err := repo.Config()
-	if err != nil {
-		os.RemoveAll(tmpDir)
-		return fmt.Errorf("failed to read config: %w", err)
-	}
-	cfg.Raw.Section("core").SetOption("filemode", "false")
-	cfg.Core.IsBare = false
-	if err := repo.SetConfig(cfg); err != nil {
-		os.RemoveAll(tmpDir)
-		return fmt.Errorf("failed to set config: %w", err)
+	// Set core.fileMode=false early
+	log.Printf("[go_git_dart] Clone: setting core.fileMode=false")
+	_ = runGitInDir(directory, "config", "core.fileMode", "false")
+
+	// Add remote
+	log.Printf("[go_git_dart] Clone: adding remote origin %s", url)
+	if err := runGitInDir(directory, "remote", "add", "origin", url); err != nil {
+		return fmt.Errorf("git remote add failed: %w", err)
 	}
 
-	// Step 3: Close the repo and reopen as non-bare, then checkout
-	log.Printf("[go_git_dart] Clone: reopening as non-bare repo")
-	repo2, err := git.PlainOpen(tmpDir)
-	if err != nil {
-		os.RemoveAll(tmpDir)
-		return fmt.Errorf("failed to reopen repo: %w", err)
+	// Fetch all refs
+	log.Printf("[go_git_dart] Clone: fetching origin")
+	if err := runGitInDirWithAuth(directory, privateKey, password, "fetch", "--all"); err != nil {
+		return fmt.Errorf("git fetch failed: %w", err)
 	}
 
-	wt, err := repo2.Worktree()
-	if err != nil {
-		os.RemoveAll(tmpDir)
-		return fmt.Errorf("failed to get worktree: %w", err)
-	}
-
-	// Get HEAD reference for checkout
-	head, err := repo2.Head()
-	if err != nil {
-		os.RemoveAll(tmpDir)
-		return fmt.Errorf("failed to get HEAD: %w", err)
-	}
-
-	log.Printf("[go_git_dart] Clone: checking out HEAD %s", head.Hash().String())
-	err = wt.Checkout(&git.CheckoutOptions{
-		Hash: head.Hash(),
-	})
-	if err != nil {
-		// If checkout still fails even with fileMode=false, try force checkout
-		log.Printf("[go_git_dart] Clone: checkout failed (%s), trying force mode...", err.Error())
-		err = wt.Checkout(&git.CheckoutOptions{
-			Hash:  head.Hash(),
-			Force: true,
-		})
-		if err != nil {
-			os.RemoveAll(tmpDir)
-			return fmt.Errorf("checkout failed even with force: %w", err)
+	// Get default branch (usually main or master)
+	defaultBranch := "main"
+	if headErr := runGitInDirWithAuth(directory, privateKey, password, "rev-parse", "--symbolic-full-name", "origin/HEAD"); headErr == nil {
+		// Parse output to get branch name
+		out, _ := runGitInDirWithAuthOutput(directory, privateKey, password, "symbolic-ref", "refs/remotes/origin/HEAD")
+		if len(out) > 0 {
+			// Extract branch name from "refs/remotes/origin/main"
+			parts := strings.Split(out, "/")
+			if len(parts) >= 3 {
+				defaultBranch = parts[len(parts)-1]
+			}
+		}
+	} else {
+		// Try master as fallback
+		if err := runGitInDirWithAuth(directory, privateKey, password, "rev-parse", "--symbolic-full-name", "origin/master"); err == nil {
+			defaultBranch = "master"
 		}
 	}
+	log.Printf("[go_git_dart] Clone: default branch is %s", defaultBranch)
 
-	// Step 4: Move to final destination
-	log.Printf("[go_git_dart] Clone: moving from %s to %s", tmpDir, directory)
-	if err := os.Rename(tmpDir, directory); err != nil {
-		// Rename might fail across filesystems, try copy
-		log.Printf("[go_git_dart] Clone: rename failed, trying manual move...")
-		if err := moveDir(tmpDir, directory); err != nil {
-			os.RemoveAll(tmpDir)
-			return fmt.Errorf("failed to move repo to final destination: %w", err)
-		}
+	// Checkout the default branch
+	log.Printf("[go_git_dart] Clone: checking out %s", defaultBranch)
+	if err := runGitInDirWithAuth(directory, privateKey, password, "checkout", "-f", defaultBranch); err != nil {
+		return fmt.Errorf("git checkout failed: %w", err)
 	}
 
-	log.Printf("[go_git_dart] Clone: bare clone fallback succeeded")
+	// Set HEAD to track the remote branch
+	_ = runGitInDir(directory, "branch", "--set-upstream-to", fmt.Sprintf("origin/%s", defaultBranch))
+
+	log.Printf("[go_git_dart] Clone: manual clone succeeded")
 	return nil
 }
 
-// moveDir moves a directory recursively using rename or copy fallback
-func moveDir(src, dst string) error {
-	if err := os.Rename(src, dst); err == nil {
-		return nil
+// runGit runs a git command
+func runGit(args ...string) error {
+	cmd := exec.Command("git", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %v failed: %s", args, string(output))
 	}
-	// Cross-device link: copy then delete
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel(src, path)
-		destPath := filepath.Join(dst, rel)
-		if info.IsDir() {
-			return os.MkdirAll(destPath, info.Mode())
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(destPath, data, info.Mode())
-	})
-	os.RemoveAll(src)
 	return nil
+}
+
+// runGitInDir runs git command in specified directory
+func runGitInDir(dir string, args ...string) error {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("[go_git_dart] git %v in %s failed: %s", args, dir, string(output))
+		return fmt.Errorf("git %v failed: %s", args, string(output))
+	}
+	return nil
+}
+
+// runGitInDirWithAuth runs git command with SSH key authentication
+func runGitInDirWithAuth(dir string, privateKey []byte, password string, args ...string) error {
+	_, err := runGitInDirWithAuthOutput(dir, privateKey, password, args...)
+	return err
+}
+
+// runGitInDirWithAuthOutput runs git command and returns output
+func runGitInDirWithAuthOutput(dir string, privateKey []byte, password string, args ...string) (string, error) {
+	// Create a temp file for the private key
+	tmpKeyFile, err := os.CreateTemp("", "git_key_*")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tmpKeyFile.Name())
+	defer tmpKeyFile.Close()
+
+	if _, err := tmpKeyFile.Write(privateKey); err != nil {
+		return "", err
+	}
+	tmpKeyFile.Chmod(0600)
+
+	// Set up SSH command to use the key
+	sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no", tmpKeyFile.Name())
+	if password != "" {
+		// SSH key with password is tricky - use GIT_ASKPASS or expect issues
+		log.Printf("[go_git_dart] WARNING: SSH key has password, may fail")
+	}
+
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_SSH_COMMAND="+sshCmd,
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("[go_git_dart] git %v in %s with auth failed: %s", args, dir, string(output))
+		return string(output), fmt.Errorf("git %v failed: %s", args, string(output))
+	}
+	return string(output), nil
 }
 
 func buildAuthForRemote(repo *git.Repository, remoteName string, privateKey []byte, password string) (transport.AuthMethod, error) {
