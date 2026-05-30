@@ -3,7 +3,9 @@ package git
 import (
 	"encoding/hex"
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	git "github.com/go-git/go-git/v5"
@@ -49,9 +51,11 @@ func setCoreFileModeFalse(directory string) error {
 }
 
 // Clone clones a repository. If the initial clone fails (e.g. due to "malformed mode"
-// errors from non-standard file permissions on Gitee), it falls back to cloning
-// as a bare repository, setting core.fileMode=false, then converting to a normal
-// repository with a worktree checkout.
+// errors from non-standard file permissions on Gitee), it falls back to:
+// 1. Clone to a temporary directory (bare, no checkout)
+// 2. Set core.fileMode=false in the config
+// 3. Convert to non-bare and checkout the worktree
+// 4. Move to the final destination
 func Clone(url string, directory string, privateKey []byte, password string) error {
 	auth, err := buildAuth(url, privateKey, password)
 	if err != nil {
@@ -59,84 +63,142 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 	}
 
 	// Try normal clone first
+	log.Printf("[go_git_dart] Clone: attempting normal clone of %s to %s", url, directory)
 	_, err = git.PlainClone(directory, false, &git.CloneOptions{
 		Auth: auth,
 		URL:  url,
 	})
 	if err == nil {
+		log.Printf("[go_git_dart] Clone: normal clone succeeded")
 		// Clone succeeded, set core.fileMode=false for future operations
 		_ = setCoreFileModeFalse(directory)
 		return nil
 	}
 
-	// Normal clone failed - try fallback: bare clone + manual checkout
-	// This handles "malformed mode" errors from repos with non-standard permissions
+	// Normal clone failed
 	errStr := err.Error()
-	if !strings.Contains(errStr, "malformed") && !strings.Contains(errStr, "filemode") && !strings.Contains(errStr, "mode") {
-		// Not a mode-related error, return original error
+	log.Printf("[go_git_dart] Clone: normal clone failed: %s", errStr)
+
+	// Check if this is a mode-related error that we can retry
+	isModeError := strings.Contains(errStr, "malformed") ||
+		strings.Contains(errStr, "mode") ||
+		strings.Contains(errStr, "filemode") ||
+		strings.Contains(errStr, "permission")
+
+	if !isModeError {
+		log.Printf("[go_git_dart] Clone: error is not mode-related, returning original error")
 		return err
 	}
+
+	log.Printf("[go_git_dart] Clone: detected mode error, trying bare clone fallback...")
 
 	// Clean up any partially created directory
 	os.RemoveAll(directory)
 
+	// Use a temporary directory for the bare clone
+	tmpDir := directory + ".tmp_clone"
+	os.RemoveAll(tmpDir)
+
 	// Step 1: Clone as bare repository (no checkout, so no mode issues)
-	repo, err := git.PlainClone(directory, true, &git.CloneOptions{
+	log.Printf("[go_git_dart] Clone: bare cloning to %s", tmpDir)
+	repo, err := git.PlainClone(tmpDir, true, &git.CloneOptions{
 		Auth: auth,
 		URL:  url,
 	})
 	if err != nil {
+		os.RemoveAll(tmpDir)
 		return fmt.Errorf("bare clone failed: %w", err)
 	}
 
-	// Step 2: Set core.fileMode=false before checkout
-	if err := setCoreFileModeFalse(directory); err != nil {
-		return fmt.Errorf("failed to set core.fileMode=false: %w", err)
-	}
-
-	// Step 3: Convert from bare to non-bare by adding a worktree
-	// go-git doesn't have a direct "unbare" function, so we use Worktree checkout
-	wt, err := repo.Worktree()
-	if err == nil {
-		// If we can get a worktree, the repo is already non-bare (shouldn't happen)
-		return nil
-	}
-
-	// For bare repos, we need to re-open as non-bare.
-	// go-git requires us to write the config to set bare = false
+	// Step 2: Set core.fileMode=false and convert to non-bare
+	log.Printf("[go_git_dart] Clone: setting core.fileMode=false and converting to non-bare")
 	cfg, err := repo.Config()
 	if err != nil {
+		os.RemoveAll(tmpDir)
 		return fmt.Errorf("failed to read config: %w", err)
 	}
+	cfg.Raw.Section("core").SetOption("filemode", "false")
 	cfg.Core.IsBare = false
 	if err := repo.SetConfig(cfg); err != nil {
-		return fmt.Errorf("failed to set bare=false: %w", err)
+		os.RemoveAll(tmpDir)
+		return fmt.Errorf("failed to set config: %w", err)
 	}
 
-	// Now open as non-bare and checkout
-	repo2, err := git.PlainOpen(directory)
+	// Step 3: Close the repo and reopen as non-bare, then checkout
+	log.Printf("[go_git_dart] Clone: reopening as non-bare repo")
+	repo2, err := git.PlainOpen(tmpDir)
 	if err != nil {
+		os.RemoveAll(tmpDir)
 		return fmt.Errorf("failed to reopen repo: %w", err)
 	}
 
-	wt, err = repo2.Worktree()
+	wt, err := repo2.Worktree()
 	if err != nil {
+		os.RemoveAll(tmpDir)
 		return fmt.Errorf("failed to get worktree: %w", err)
 	}
 
 	// Get HEAD reference for checkout
 	head, err := repo2.Head()
 	if err != nil {
+		os.RemoveAll(tmpDir)
 		return fmt.Errorf("failed to get HEAD: %w", err)
 	}
 
+	log.Printf("[go_git_dart] Clone: checking out HEAD %s", head.Hash().String())
 	err = wt.Checkout(&git.CheckoutOptions{
 		Hash: head.Hash(),
 	})
 	if err != nil {
-		return fmt.Errorf("checkout failed: %w", err)
+		// If checkout still fails even with fileMode=false, try force checkout
+		log.Printf("[go_git_dart] Clone: checkout failed (%s), trying force mode...", err.Error())
+		err = wt.Checkout(&git.CheckoutOptions{
+			Hash:  head.Hash(),
+			Force: true,
+		})
+		if err != nil {
+			os.RemoveAll(tmpDir)
+			return fmt.Errorf("checkout failed even with force: %w", err)
+		}
 	}
 
+	// Step 4: Move to final destination
+	log.Printf("[go_git_dart] Clone: moving from %s to %s", tmpDir, directory)
+	if err := os.Rename(tmpDir, directory); err != nil {
+		// Rename might fail across filesystems, try copy
+		log.Printf("[go_git_dart] Clone: rename failed, trying manual move...")
+		if err := moveDir(tmpDir, directory); err != nil {
+			os.RemoveAll(tmpDir)
+			return fmt.Errorf("failed to move repo to final destination: %w", err)
+		}
+	}
+
+	log.Printf("[go_git_dart] Clone: bare clone fallback succeeded")
+	return nil
+}
+
+// moveDir moves a directory recursively using rename or copy fallback
+func moveDir(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	// Cross-device link: copy then delete
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, path)
+		destPath := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(destPath, info.Mode())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(destPath, data, info.Mode())
+	})
+	os.RemoveAll(src)
 	return nil
 }
 
