@@ -175,15 +175,15 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 		Force:  true,
 	})
 	if err != nil {
-		// Try tracking the remote branch directly
+		// Try checking out the remote tracking branch directly
 		log.Printf("[go_git_dart] Clone: branch checkout failed (%s), trying remote ref", err.Error())
 		remoteRef := plumbing.NewRemoteReferenceName("origin", defaultBranch)
-		remoteHash, err := repo.ResolveReference(remoteRef)
+		ref, err := repo.Reference(remoteRef, false)
 		if err != nil {
-			return fmt.Errorf("ResolveReference(%s) failed: %w", remoteRef, err)
+			return fmt.Errorf("Reference(%s) failed: %w", remoteRef, err)
 		}
 		err = wt.Checkout(&git.CheckoutOptions{
-			Hash:  remoteHash.Hash(),
+			Hash:  ref.Hash(),
 			Force: true,
 		})
 		if err != nil {
@@ -191,13 +191,20 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 		}
 	}
 
-	// Step 6: Set upstream tracking
-	_ = repo.SetHead(plumbing.NewBranchReferenceName(defaultBranch))
-	_, _ = repo.CreateBranch(&config.Branch{
-		Name:   defaultBranch,
-		Remote: "origin",
-		Merge:  plumbing.NewBranchReferenceName(defaultBranch),
-	})
+	// Step 6: Create a local branch tracking the remote
+	headRef, err := repo.Head()
+	if err != nil {
+		log.Printf("[go_git_dart] Clone: warning: failed to get HEAD: %s", err.Error())
+	} else {
+		_, err = repo.CreateReference(
+			plumbing.NewBranchReferenceName(defaultBranch),
+			headRef.Hash(),
+		)
+		if err != nil {
+			// Branch may already exist, that's fine
+			log.Printf("[go_git_dart] Clone: warning: CreateReference failed: %s", err.Error())
+		}
+	}
 
 	log.Printf("[go_git_dart] Clone: init + fetch fallback succeeded")
 	return nil
