@@ -132,8 +132,11 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 	refs, err := repo.References()
 	if err == nil {
 		refs.ForEach(func(ref *plumbing.Reference) error {
-			if ref.Name().Short() == "origin/main" || ref.Name().Short() == "origin/master" {
-				defaultBranch = ref.Name().Short()
+			shortName := ref.Name().Short()
+			// Check for remote tracking branches like "origin/main" or "origin/master"
+			if shortName == "origin/main" || shortName == "origin/master" {
+				// Extract branch name: "origin/master" -> "master"
+				defaultBranch = strings.TrimPrefix(shortName, "origin/")
 			}
 			if ref.Name() == "HEAD" && ref.Type() == plumbing.SymbolicReference {
 				target := ref.Target().Short()
