@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"strings"
 
 	git "github.com/go-git/go-git/v5"
@@ -50,12 +49,13 @@ func setCoreFileModeFalse(directory string) error {
 	return r.SetConfig(cfg)
 }
 
-// Clone clones a repository. If the initial clone fails (e.g. due to "malformed mode"
-// errors from non-standard file permissions on Gitee), it falls back to:
-// 1. Create a new non-bare git repo in target directory
-// 2. Fetch from remote
-// 3. Set core.fileMode=false
-// 4. Checkout files with force mode to ignore permission errors
+// Clone clones a repository. If the initial clone fails due to malformed mode
+// errors (non-standard file permissions from Gitee etc.), it falls back to:
+// 1. git.PlainInit (non-bare, no checkout)
+// 2. Add remote origin
+// 3. Fetch all refs
+// 4. Set core.fileMode=false
+// 5. Checkout with force to ignore permission issues
 func Clone(url string, directory string, privateKey []byte, password string) error {
 	auth, err := buildAuth(url, privateKey, password)
 	if err != nil {
@@ -70,7 +70,6 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 	})
 	if err == nil {
 		log.Printf("[go_git_dart] Clone: normal clone succeeded")
-		// Clone succeeded, set core.fileMode=false for future operations
 		_ = setCoreFileModeFalse(directory)
 		return nil
 	}
@@ -90,135 +89,118 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 		return err
 	}
 
-	log.Printf("[go_git_dart] Clone: detected mode error, trying manual init + fetch fallback...")
+	log.Printf("[go_git_dart] Clone: detected mode error, trying init + fetch fallback...")
 
 	// Clean up any partially created directory
 	os.RemoveAll(directory)
 
-	// Use git's native error handling for permission issues
-	// by using exec.Command to run git commands directly
-	return cloneWithGitCommand(url, directory, privateKey, password)
-}
-
-// cloneWithGitCommand uses git command line to clone, bypassing go-git's checkout issues
-func cloneWithGitCommand(url, directory string, privateKey []byte, password string) error {
-	// First init a repo
-	log.Printf("[go_git_dart] Clone: git init %s", directory)
-	if err := runGit("init", directory); err != nil {
-		return fmt.Errorf("git init failed: %w", err)
+	// Step 1: Init a non-bare repository using go-git API
+	log.Printf("[go_git_dart] Clone: PlainInit %s", directory)
+	repo, err := git.PlainInit(directory, false)
+	if err != nil {
+		return fmt.Errorf("PlainInit failed: %w", err)
 	}
 
-	// Set core.fileMode=false early
+	// Step 2: Set core.fileMode=false BEFORE fetch/checkout
 	log.Printf("[go_git_dart] Clone: setting core.fileMode=false")
-	_ = runGitInDir(directory, "config", "core.fileMode", "false")
-
-	// Add remote
-	log.Printf("[go_git_dart] Clone: adding remote origin %s", url)
-	if err := runGitInDir(directory, "remote", "add", "origin", url); err != nil {
-		return fmt.Errorf("git remote add failed: %w", err)
+	if err := setCoreFileModeFalse(directory); err != nil {
+		log.Printf("[go_git_dart] Clone: warning: setCoreFileModeFalse failed: %s", err.Error())
 	}
 
-	// Fetch all refs
-	log.Printf("[go_git_dart] Clone: fetching origin")
-	if err := runGitInDirWithAuth(directory, privateKey, password, "fetch", "--all"); err != nil {
-		return fmt.Errorf("git fetch failed: %w", err)
+	// Step 3: Create remote and fetch
+	log.Printf("[go_git_dart] Clone: creating remote origin %s", url)
+	_, err = repo.CreateRemote(&config.RemoteConfig{
+		Name: "origin",
+		URLs: []string{url},
+	})
+	if err != nil {
+		return fmt.Errorf("CreateRemote failed: %w", err)
 	}
 
-	// Get default branch (usually main or master)
+	log.Printf("[go_git_dart] Clone: fetching from origin...")
+	err = repo.Fetch(&git.FetchOptions{
+		RemoteName: "origin",
+		Auth:       auth,
+		Tags:       git.AllTags,
+	})
+	if err != nil && err != git.NoErrAlreadyUpToDate {
+		return fmt.Errorf("Fetch failed: %w", err)
+	}
+
+	// Step 4: Determine default branch
 	defaultBranch := "main"
-	if headErr := runGitInDirWithAuth(directory, privateKey, password, "rev-parse", "--symbolic-full-name", "origin/HEAD"); headErr == nil {
-		// Parse output to get branch name
-		out, _ := runGitInDirWithAuthOutput(directory, privateKey, password, "symbolic-ref", "refs/remotes/origin/HEAD")
-		if len(out) > 0 {
-			// Extract branch name from "refs/remotes/origin/main"
-			parts := strings.Split(out, "/")
-			if len(parts) >= 3 {
-				defaultBranch = parts[len(parts)-1]
+	refs, err := repo.References()
+	if err == nil {
+		refs.ForEach(func(ref *plumbing.Reference) error {
+			if ref.Name().Short() == "origin/main" || ref.Name().Short() == "origin/master" {
+				defaultBranch = ref.Name().Short()
 			}
-		}
-	} else {
-		// Try master as fallback
-		if err := runGitInDirWithAuth(directory, privateKey, password, "rev-parse", "--symbolic-full-name", "origin/master"); err == nil {
-			defaultBranch = "master"
+			if ref.Name() == "HEAD" && ref.Type() == plumbing.SymbolicReference {
+				target := ref.Target().Short()
+				if strings.HasPrefix(target, "refs/heads/") {
+					defaultBranch = strings.TrimPrefix(target, "refs/heads/")
+				}
+			}
+			return nil
+		})
+	}
+	// Also check remotes for HEAD symref
+	rem, err := repo.Remote("origin")
+	if err == nil {
+		listRefs, err := rem.List(&git.ListOptions{Auth: auth})
+		if err == nil {
+			for _, ref := range listRefs {
+				if ref.Name() == "HEAD" {
+					target := ref.Target().Short()
+					if strings.HasPrefix(target, "refs/heads/") {
+						defaultBranch = strings.TrimPrefix(target, "refs/heads/")
+					}
+					break
+				}
+			}
 		}
 	}
 	log.Printf("[go_git_dart] Clone: default branch is %s", defaultBranch)
 
-	// Checkout the default branch
-	log.Printf("[go_git_dart] Clone: checking out %s", defaultBranch)
-	if err := runGitInDirWithAuth(directory, privateKey, password, "checkout", "-f", defaultBranch); err != nil {
-		return fmt.Errorf("git checkout failed: %w", err)
+	// Step 5: Checkout the default branch with force
+	wt, err := repo.Worktree()
+	if err != nil {
+		return fmt.Errorf("Worktree failed: %w", err)
 	}
 
-	// Set HEAD to track the remote branch
-	_ = runGitInDir(directory, "branch", "--set-upstream-to", fmt.Sprintf("origin/%s", defaultBranch))
+	branchRef := plumbing.NewBranchReferenceName(defaultBranch)
+	log.Printf("[go_git_dart] Clone: checking out %s with force", defaultBranch)
+	err = wt.Checkout(&git.CheckoutOptions{
+		Branch: branchRef,
+		Force:  true,
+	})
+	if err != nil {
+		// Try tracking the remote branch directly
+		log.Printf("[go_git_dart] Clone: branch checkout failed (%s), trying remote ref", err.Error())
+		remoteRef := plumbing.NewRemoteReferenceName("origin", defaultBranch)
+		remoteHash, err := repo.ResolveReference(remoteRef)
+		if err != nil {
+			return fmt.Errorf("ResolveReference(%s) failed: %w", remoteRef, err)
+		}
+		err = wt.Checkout(&git.CheckoutOptions{
+			Hash:  remoteHash.Hash(),
+			Force: true,
+		})
+		if err != nil {
+			return fmt.Errorf("Checkout by hash failed: %w", err)
+		}
+	}
 
-	log.Printf("[go_git_dart] Clone: manual clone succeeded")
+	// Step 6: Set upstream tracking
+	_ = repo.SetHead(plumbing.NewBranchReferenceName(defaultBranch))
+	_, _ = repo.CreateBranch(&config.Branch{
+		Name:   defaultBranch,
+		Remote: "origin",
+		Merge:  plumbing.NewBranchReferenceName(defaultBranch),
+	})
+
+	log.Printf("[go_git_dart] Clone: init + fetch fallback succeeded")
 	return nil
-}
-
-// runGit runs a git command
-func runGit(args ...string) error {
-	cmd := exec.Command("git", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git %v failed: %s", args, string(output))
-	}
-	return nil
-}
-
-// runGitInDir runs git command in specified directory
-func runGitInDir(dir string, args ...string) error {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Printf("[go_git_dart] git %v in %s failed: %s", args, dir, string(output))
-		return fmt.Errorf("git %v failed: %s", args, string(output))
-	}
-	return nil
-}
-
-// runGitInDirWithAuth runs git command with SSH key authentication
-func runGitInDirWithAuth(dir string, privateKey []byte, password string, args ...string) error {
-	_, err := runGitInDirWithAuthOutput(dir, privateKey, password, args...)
-	return err
-}
-
-// runGitInDirWithAuthOutput runs git command and returns output
-func runGitInDirWithAuthOutput(dir string, privateKey []byte, password string, args ...string) (string, error) {
-	// Create a temp file for the private key
-	tmpKeyFile, err := os.CreateTemp("", "git_key_*")
-	if err != nil {
-		return "", err
-	}
-	defer os.Remove(tmpKeyFile.Name())
-	defer tmpKeyFile.Close()
-
-	if _, err := tmpKeyFile.Write(privateKey); err != nil {
-		return "", err
-	}
-	tmpKeyFile.Chmod(0600)
-
-	// Set up SSH command to use the key
-	sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no", tmpKeyFile.Name())
-	if password != "" {
-		// SSH key with password is tricky - use GIT_ASKPASS or expect issues
-		log.Printf("[go_git_dart] WARNING: SSH key has password, may fail")
-	}
-
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GIT_SSH_COMMAND="+sshCmd,
-		"GIT_TERMINAL_PROMPT=0",
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Printf("[go_git_dart] git %v in %s with auth failed: %s", args, dir, string(output))
-		return string(output), fmt.Errorf("git %v failed: %s", args, string(output))
-	}
-	return string(output), nil
 }
 
 func buildAuthForRemote(repo *git.Repository, remoteName string, privateKey []byte, password string) (transport.AuthMethod, error) {
