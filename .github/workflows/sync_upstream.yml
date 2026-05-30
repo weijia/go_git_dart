@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: 2024 GitJournal Contributors
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+name: Sync with Upstream
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly on Sunday
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/GitJournal/go_git_dart.git
+          git fetch upstream
+
+      - name: Check for changes
+        id: check
+        run: |
+          git log HEAD..upstream/main --oneline > /tmp/changes.txt || true
+          if [ -s /tmp/changes.txt ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "changes<<EOF" >> $GITHUB_OUTPUT
+            cat /tmp/changes.txt >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Merge upstream changes
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          git merge upstream/main --no-edit
+
+      - name: Verify malformed mode fix
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          if ! grep -q "setCoreFileModeFalse" src/internal/git/git.go; then
+            echo "::error::Malformed mode fix was lost during merge!"
+            echo "Please manually re-apply the fix."
+            exit 1
+          fi
+          echo "✓ Malformed mode fix verified"
+
+      - name: Push changes
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          git push origin main
+          echo "✓ Synced with upstream"
+
+      - name: Create issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Upstream sync failed - malformed mode fix may be lost',
+              body: 'The automated sync with upstream failed. Please check the workflow logs and manually resolve any conflicts.\n\nThe malformed mode fix in `src/internal/git/git.go` must be preserved.',
+              labels: ['bug', 'automation']
+            });

@@ -43,10 +43,7 @@ func setCoreFileModeFalse(directory string) error {
 	if err != nil {
 		return err
 	}
-	// Check if core.fileMode is already set to false
-	if val, ok := cfg.Raw.Section("core").Option("filemode"); ok && val == "false" {
-		return nil
-	}
+	// Set core.fileMode to false
 	cfg.Raw.Section("core").SetOption("filemode", "false")
 	return r.SetConfig(cfg)
 }
