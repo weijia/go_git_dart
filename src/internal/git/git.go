@@ -196,13 +196,15 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 	if err != nil {
 		log.Printf("[go_git_dart] Clone: warning: failed to get HEAD: %s", err.Error())
 	} else {
-		_, err = repo.CreateReference(
+		// Create branch reference using Storer
+		newBranch := plumbing.NewHashReference(
 			plumbing.NewBranchReferenceName(defaultBranch),
 			headRef.Hash(),
 		)
+		err = repo.Storer.SetReference(newBranch)
 		if err != nil {
 			// Branch may already exist, that's fine
-			log.Printf("[go_git_dart] Clone: warning: CreateReference failed: %s", err.Error())
+			log.Printf("[go_git_dart] Clone: warning: SetReference failed: %s", err.Error())
 		}
 	}
 
