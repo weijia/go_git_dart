@@ -3,13 +3,17 @@ package git
 import (
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/format/index"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/go-git/go-git/v5/storage/memory"
@@ -165,33 +169,96 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 	}
 	log.Printf("[go_git_dart] Clone: default branch is %s", defaultBranch)
 
-	// Step 5: Checkout the default branch with force
-	wt, err := repo.Worktree()
+	// Step 5: Checkout files manually to bypass go-git's ToOSFileMode errors
+	// go-git's ToOSFileMode() doesn't support non-standard modes like 0100600
+	// Instead of using wt.Checkout(), we iterate the tree and write files ourselves
+	log.Printf("[go_git_dart] Clone: manually checking out files to bypass ToOSFileMode")
+
+	remoteRef := plumbing.NewRemoteReferenceName("origin", defaultBranch)
+	ref, err := repo.Reference(remoteRef, false)
 	if err != nil {
-		return fmt.Errorf("Worktree failed: %w", err)
+		return fmt.Errorf("Reference(%s) failed: %w", remoteRef, err)
 	}
 
-	branchRef := plumbing.NewBranchReferenceName(defaultBranch)
-	log.Printf("[go_git_dart] Clone: checking out %s with force", defaultBranch)
-	err = wt.Checkout(&git.CheckoutOptions{
-		Branch: branchRef,
-		Force:  true,
+	commitObj, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		return fmt.Errorf("CommitObject failed: %w", err)
+	}
+
+	tree, err := commitObj.Tree()
+	if err != nil {
+		return fmt.Errorf("Tree failed: %w", err)
+	}
+
+	// Build the index
+	idx, err := repo.Storer.Index()
+	if err != nil {
+		return fmt.Errorf("Index failed: %w", err)
+	}
+	idx.Entries = make([]*index.Entry, 0)
+
+	// Walk the tree and write files
+	err = tree.Files().ForEach(func(f *object.File) error {
+		log.Printf("[go_git_dart] Clone: writing file %s (mode=%s)", f.Name, f.Mode)
+
+		// Create parent directories
+		dir := filepath.Dir(filepath.Join(directory, f.Name))
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("MkdirAll(%s) failed: %w", dir, err)
+		}
+
+		// Handle symlinks
+		if f.Mode == 0120000 {
+			content, err := f.Contents()
+			if err != nil {
+				return fmt.Errorf("read symlink %s failed: %w", f.Name, err)
+			}
+			if err := os.Symlink(content, filepath.Join(directory, f.Name)); err != nil {
+				log.Printf("[go_git_dart] Clone: symlink %s failed: %s", f.Name, err.Error())
+			}
+		} else {
+			// Regular file - write with 0644 permissions, ignoring git mode
+			destPath := filepath.Join(directory, f.Name)
+			reader, err := f.Reader()
+			if err != nil {
+				return fmt.Errorf("Reader(%s) failed: %w", f.Name, err)
+			}
+
+			destFile, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+			if err != nil {
+				reader.Close()
+				return fmt.Errorf("OpenFile(%s) failed: %w", f.Name, err)
+			}
+
+			_, err = io.Copy(destFile, reader)
+			reader.Close()
+			destFile.Close()
+			if err != nil {
+				return fmt.Errorf("Write(%s) failed: %w", f.Name, err)
+			}
+		}
+
+		// Add to index
+		idx.Entries = append(idx.Entries, &index.Entry{
+			Name: f.Name,
+			Hash: f.Hash,
+			Mode: f.Mode,
+		})
+
+		return nil
 	})
 	if err != nil {
-		// Try checking out the remote tracking branch directly
-		log.Printf("[go_git_dart] Clone: branch checkout failed (%s), trying remote ref", err.Error())
-		remoteRef := plumbing.NewRemoteReferenceName("origin", defaultBranch)
-		ref, err := repo.Reference(remoteRef, false)
-		if err != nil {
-			return fmt.Errorf("Reference(%s) failed: %w", remoteRef, err)
-		}
-		err = wt.Checkout(&git.CheckoutOptions{
-			Hash:  ref.Hash(),
-			Force: true,
-		})
-		if err != nil {
-			return fmt.Errorf("Checkout by hash failed: %w", err)
-		}
+		return fmt.Errorf("file checkout failed: %w", err)
+	}
+
+	// Write index
+	if err := repo.Storer.SetIndex(idx); err != nil {
+		log.Printf("[go_git_dart] Clone: warning: SetIndex failed: %s", err.Error())
+	}
+
+	// Set HEAD to the commit
+	if err := repo.Storer.SetReference(plumbing.NewHashReference("HEAD", ref.Hash())); err != nil {
+		log.Printf("[go_git_dart] Clone: warning: SetReference HEAD failed: %s", err.Error())
 	}
 
 	// Step 6: Create a local branch tracking the remote
