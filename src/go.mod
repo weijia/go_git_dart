@@ -1,15 +1,15 @@
 module github.com/gitjournal/go-git-dart
 
-go 1.21
+go 1.22
 
 toolchain go1.21.5
 
 require (
 	github.com/go-git/go-git/v5 v5.12.0
-	golang.org/x/crypto v0.26.0
+	golang.org/x/crypto v0.35.0
 )
 
-replace github.com/go-git/go-git/v5 => github.com/weijia/go-git/v5 v5.12.2-malformedfix
+replace github.com/go-git/go-git/v5 => github.com/weijia/go-git/v5 v5.19.1
 
 require (
 	dario.cat/mergo v1.0.1 // indirect
