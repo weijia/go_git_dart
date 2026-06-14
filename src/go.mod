@@ -9,7 +9,7 @@ require (
 	golang.org/x/crypto v0.35.0
 )
 
-replace github.com/go-git/go-git/v5 => github.com/weijia/go-git/v5 v5.19.1
+replace github.com/go-git/go-git/v5 => github.com/weijia/go-git/v5 v5.19.1-0.20260614.c81020dd
 
 require (
 	dario.cat/mergo v1.0.1 // indirect
