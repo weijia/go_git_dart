@@ -5,17 +5,6 @@ package git
 #include <android/log.h>
 */
 import "C"
-import "unsafe"
-
-// androidLog writes a debug message to Android logcat
-func androidLog(tag, msg string) {
-	ctag := C.CString(tag)
-	cmsg := C.CString(msg)
-	defer C.free(unsafe.Pointer(ctag))
-	defer C.free(unsafe.Pointer(cmsg))
-	C.__android_log_write(C.ANDROID_LOG_DEBUG, ctag, cmsg)
-}
-
 import (
 	"encoding/hex"
 	"fmt"
@@ -23,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unsafe"
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
@@ -35,6 +25,15 @@ import (
 
 	stdssh "golang.org/x/crypto/ssh"
 )
+
+// androidLog writes a debug message to Android logcat
+func androidLog(tag, msg string) {
+	ctag := C.CString(tag)
+	cmsg := C.CString(msg)
+	defer C.free(unsafe.Pointer(ctag))
+	defer C.free(unsafe.Pointer(cmsg))
+	C.__android_log_write(C.ANDROID_LOG_DEBUG, ctag, cmsg)
+}
 
 func buildAuth(url string, privateKey []byte, password string) (transport.AuthMethod, error) {
 	ep, err := transport.NewEndpoint(url)
