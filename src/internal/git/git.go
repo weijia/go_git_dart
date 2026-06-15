@@ -1,7 +1,5 @@
 package git
 
-
-// Android logging support
 /*
 #cgo LDFLAGS: -landroid
 #include <android/log.h>
@@ -9,12 +7,13 @@ package git
 import "C"
 import "unsafe"
 
+// androidLog writes a debug message to Android logcat
 func androidLog(tag, msg string) {
-    ctag := C.CString(tag)
-    cmsg := C.CString(msg)
-    defer C.free(unsafe.Pointer(ctag))
-    defer C.free(unsafe.Pointer(cmsg))
-    C.__android_log_write(C.ANDROID_LOG_DEBUG, ctag, cmsg)
+	ctag := C.CString(tag)
+	cmsg := C.CString(msg)
+	defer C.free(unsafe.Pointer(ctag))
+	defer C.free(unsafe.Pointer(cmsg))
+	C.__android_log_write(C.ANDROID_LOG_DEBUG, ctag, cmsg)
 }
 
 import (
@@ -48,7 +47,6 @@ func buildAuth(url string, privateKey []byte, password string) (transport.AuthMe
 		return nil, err
 	}
 	publicKeys.HostKeyCallback = stdssh.InsecureIgnoreHostKey()
-
 	return publicKeys, nil
 }
 
@@ -83,20 +81,20 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 	}
 
 	// Try normal clone first
-	androidLog("go_git_dart", " Clone: attempting normal clone of %s to %s", url, directory)
+	androidLog("go_git_dart", "Clone: attempting normal clone of "+url+" to "+directory)
 	_, err = git.PlainClone(directory, false, &git.CloneOptions{
 		Auth: auth,
 		URL:  url,
 	})
 	if err == nil {
-		androidLog("go_git_dart", " Clone: normal clone succeeded")
+		androidLog("go_git_dart", "Clone: normal clone succeeded")
 		_ = setCoreFileModeFalse(directory)
 		return nil
 	}
 
 	// Normal clone failed
 	errStr := err.Error()
-	androidLog("go_git_dart", " Clone: normal clone failed: %s", errStr)
+	androidLog("go_git_dart", "Clone: normal clone failed: "+errStr)
 
 	// Check if this is a mode-related error that we can retry
 	isModeError := strings.Contains(errStr, "malformed") ||
@@ -105,30 +103,30 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 		strings.Contains(errStr, "permission")
 
 	if !isModeError {
-		androidLog("go_git_dart", " Clone: error is not mode-related, returning original error")
+		androidLog("go_git_dart", "Clone: error is not mode-related, returning original error")
 		return err
 	}
 
-	androidLog("go_git_dart", " Clone: detected mode error, trying init + fetch fallback...")
+	androidLog("go_git_dart", "Clone: detected mode error, trying init + fetch fallback...")
 
 	// Clean up any partially created directory
 	os.RemoveAll(directory)
 
 	// Step 1: Init a non-bare repository using go-git API
-	androidLog("go_git_dart", " Clone: PlainInit %s", directory)
+	androidLog("go_git_dart", "Clone: PlainInit "+directory)
 	repo, err := git.PlainInit(directory, false)
 	if err != nil {
 		return fmt.Errorf("PlainInit failed: %w", err)
 	}
 
 	// Step 2: Set core.fileMode=false BEFORE fetch/checkout
-	androidLog("go_git_dart", " Clone: setting core.fileMode=false")
+	androidLog("go_git_dart", "Clone: setting core.fileMode=false")
 	if err := setCoreFileModeFalse(directory); err != nil {
-		androidLog("go_git_dart", " Clone: warning: setCoreFileModeFalse failed: %s", err.Error())
+		androidLog("go_git_dart", "Clone: warning: setCoreFileModeFalse failed: "+err.Error())
 	}
 
 	// Step 3: Create remote and fetch
-	androidLog("go_git_dart", " Clone: creating remote origin %s", url)
+	androidLog("go_git_dart", "Clone: creating remote origin "+url)
 	_, err = repo.CreateRemote(&config.RemoteConfig{
 		Name: "origin",
 		URLs: []string{url},
@@ -137,7 +135,7 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 		return fmt.Errorf("CreateRemote failed: %w", err)
 	}
 
-	androidLog("go_git_dart", " Clone: fetching from origin...")
+	androidLog("go_git_dart", "Clone: fetching from origin...")
 	err = repo.Fetch(&git.FetchOptions{
 		RemoteName: "origin",
 		Auth:       auth,
@@ -183,12 +181,12 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 			}
 		}
 	}
-	androidLog("go_git_dart", " Clone: default branch is %s", defaultBranch)
+	androidLog("go_git_dart", "Clone: default branch is "+defaultBranch)
 
 	// Step 5: Checkout files manually to bypass go-git's ToOSFileMode errors
 	// go-git's ToOSFileMode() doesn't support non-standard modes like 0100600
 	// Instead of using wt.Checkout(), we iterate the tree and write files ourselves
-	androidLog("go_git_dart", " Clone: manually checking out files to bypass ToOSFileMode")
+	androidLog("go_git_dart", "Clone: manually checking out files to bypass ToOSFileMode")
 
 	remoteRef := plumbing.NewRemoteReferenceName("origin", defaultBranch)
 	ref, err := repo.Reference(remoteRef, false)
@@ -215,7 +213,7 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 
 	// Walk the tree and write files
 	err = tree.Files().ForEach(func(f *object.File) error {
-		androidLog("go_git_dart", " Clone: writing file %s (mode=%s)", f.Name, f.Mode)
+		androidLog("go_git_dart", "Clone: writing file "+f.Name+" (mode="+f.Mode.String()+")")
 
 		// Create parent directories
 		dir := filepath.Dir(filepath.Join(directory, f.Name))
@@ -230,7 +228,7 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 				return fmt.Errorf("read symlink %s failed: %w", f.Name, err)
 			}
 			if err := os.Symlink(content, filepath.Join(directory, f.Name)); err != nil {
-				androidLog("go_git_dart", " Clone: symlink %s failed: %s", f.Name, err.Error())
+				androidLog("go_git_dart", "Clone: symlink "+f.Name+" failed: "+err.Error())
 			}
 		} else {
 			// Regular file - write with 0644 permissions, ignoring git mode
@@ -269,18 +267,18 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 
 	// Write index
 	if err := repo.Storer.SetIndex(idx); err != nil {
-		androidLog("go_git_dart", " Clone: warning: SetIndex failed: %s", err.Error())
+		androidLog("go_git_dart", "Clone: warning: SetIndex failed: "+err.Error())
 	}
 
 	// Set HEAD to the commit
 	if err := repo.Storer.SetReference(plumbing.NewHashReference("HEAD", ref.Hash())); err != nil {
-		androidLog("go_git_dart", " Clone: warning: SetReference HEAD failed: %s", err.Error())
+		androidLog("go_git_dart", "Clone: warning: SetReference HEAD failed: "+err.Error())
 	}
 
 	// Step 6: Create a local branch tracking the remote
 	headRef, err := repo.Head()
 	if err != nil {
-		androidLog("go_git_dart", " Clone: warning: failed to get HEAD: %s", err.Error())
+		androidLog("go_git_dart", "Clone: warning: failed to get HEAD: "+err.Error())
 	} else {
 		// Create branch reference using Storer
 		newBranch := plumbing.NewHashReference(
@@ -290,11 +288,11 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 		err = repo.Storer.SetReference(newBranch)
 		if err != nil {
 			// Branch may already exist, that's fine
-			androidLog("go_git_dart", " Clone: warning: SetReference failed: %s", err.Error())
+			androidLog("go_git_dart", "Clone: warning: SetReference failed: "+err.Error())
 		}
 	}
 
-	androidLog("go_git_dart", " Clone: init + fetch fallback succeeded")
+	androidLog("go_git_dart", "Clone: init + fetch fallback succeeded")
 	return nil
 }
 
@@ -303,12 +301,10 @@ func buildAuthForRemote(repo *git.Repository, remoteName string, privateKey []by
 	if err != nil {
 		return nil, err
 	}
-
 	urls := rem.Config().URLs
 	if len(urls) == 0 {
 		return nil, fmt.Errorf("no remote url")
 	}
-
 	return buildAuth(urls[0], privateKey, password)
 }
 
@@ -317,21 +313,17 @@ func Fetch(remote string, directory string, privateKey []byte, password string) 
 	if err != nil {
 		return err
 	}
-
 	auth, err := buildAuthForRemote(r, remote, privateKey, password)
 	if err != nil {
 		return err
 	}
-
 	err = r.Fetch(&git.FetchOptions{RemoteName: remote, Auth: auth})
 	if err == git.NoErrAlreadyUpToDate {
 		return nil
 	}
-
 	if err != nil {
 		return err
 	}
-
 	return nil
 }
 
@@ -350,7 +342,6 @@ func pull(
 	if err := fetchFn(remote, directory, privateKey, password); err != nil {
 		return err
 	}
-
 	return mergeFn(directory)
 }
 
@@ -359,21 +350,17 @@ func Push(remote string, directory string, privateKey []byte, password string) e
 	if err != nil {
 		return err
 	}
-
 	auth, err := buildAuthForRemote(r, remote, privateKey, password)
 	if err != nil {
 		return err
 	}
-
 	err = r.Push(&git.PushOptions{RemoteName: remote, Auth: auth})
 	if err == git.NoErrAlreadyUpToDate {
 		return nil
 	}
-
 	if err != nil {
 		return err
 	}
-
 	return nil
 }
 
@@ -382,17 +369,14 @@ func DefaultBranch(remoteUrl string, privateKey []byte, password string) (string
 	if err != nil {
 		return "", err
 	}
-
 	remote := git.NewRemote(memory.NewStorage(), &config.RemoteConfig{
 		Name: "origin",
 		URLs: []string{remoteUrl},
 	})
-
 	refs, err := remote.List(&git.ListOptions{Auth: auth})
 	if err != nil {
 		return "", err
 	}
-
 	defaultBranch := ""
 	for _, ref := range refs {
 		if ref.Name() == "HEAD" {
@@ -400,7 +384,6 @@ func DefaultBranch(remoteUrl string, privateKey []byte, password string) (string
 			break
 		}
 	}
-
 	return defaultBranch, nil
 }
 
@@ -409,7 +392,6 @@ func Add(directory string, path string) error {
 	if err != nil {
 		return err
 	}
-
 	_, err = w.Add(path)
 	return err
 }
@@ -419,7 +401,6 @@ func Remove(directory string, path string) error {
 	if err != nil {
 		return err
 	}
-
 	_, err = w.Remove(path)
 	return err
 }
@@ -429,7 +410,6 @@ func ResetHard(directory string) error {
 	if err != nil {
 		return err
 	}
-
 	return w.Reset(&git.ResetOptions{Mode: git.HardReset})
 }
 
@@ -438,7 +418,6 @@ func ResetHardTo(directory string, commitHash string) error {
 	if err != nil {
 		return err
 	}
-
 	commitHash = strings.TrimSpace(commitHash)
 	if len(commitHash) != 40 {
 		return fmt.Errorf("commit hash must be 40 hexadecimal characters")
@@ -446,7 +425,6 @@ func ResetHardTo(directory string, commitHash string) error {
 	if _, err := hex.DecodeString(commitHash); err != nil {
 		return fmt.Errorf("invalid commit hash: %w", err)
 	}
-
 	return w.Reset(&git.ResetOptions{
 		Commit: plumbing.NewHash(commitHash),
 		Mode:   git.HardReset,
@@ -458,17 +436,14 @@ func Checkout(directory string, branch string) error {
 	if branch == "" {
 		return fmt.Errorf("branch name is required")
 	}
-
 	r, w, err := openRepositoryAndWorktree(directory)
 	if err != nil {
 		return err
 	}
-
 	branchRef := plumbing.NewBranchReferenceName(branch)
 	if _, err := r.Reference(branchRef, true); err != nil {
 		return err
 	}
-
 	return w.Checkout(&git.CheckoutOptions{Branch: branchRef})
 }
 
@@ -482,11 +457,33 @@ func openRepositoryAndWorktree(directory string) (*git.Repository, *git.Worktree
 	if err != nil {
 		return nil, nil, err
 	}
-
 	w, err := r.Worktree()
 	if err != nil {
 		return nil, nil, err
 	}
-
 	return r, w, nil
+}
+
+func MergeCurrentBranch(directory string) error {
+	r, err := git.PlainOpen(directory)
+	if err != nil {
+		return err
+	}
+	w, err := r.Worktree()
+	if err != nil {
+		return err
+	}
+	head, err := r.Head()
+	if err != nil {
+		return err
+	}
+	branchName := head.Name().Short()
+	refName := plumbing.NewRemoteReferenceName("origin", branchName)
+	remoteRef, err := r.Reference(refName, true)
+	if err != nil {
+		return err
+	}
+	return w.Merge(&git.MergeOptions{
+		Strategy: git.FastForwardMerge,
+	})
 }
