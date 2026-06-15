@@ -423,27 +423,3 @@ func openRepositoryAndWorktree(directory string) (*git.Repository, *git.Worktree
 	}
 	return r, w, nil
 }
-
-func MergeCurrentBranch(directory string) error {
-	r, err := git.PlainOpen(directory)
-	if err != nil {
-		return err
-	}
-	w, err := r.Worktree()
-	if err != nil {
-		return err
-	}
-	head, err := r.Head()
-	if err != nil {
-		return err
-	}
-	branchName := head.Name().Short()
-	refName := plumbing.NewRemoteReferenceName("origin", branchName)
-	_, err = r.Reference(refName, true)
-	if err != nil {
-		return err
-	}
-	return w.Merge(&git.MergeOptions{
-		Strategy: git.FastForwardMerge,
-	})
-}
