@@ -85,6 +85,29 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 	errStr := err.Error()
 	androidLog("go_git_dart", "Clone: normal clone failed: "+errStr)
 
+	// Handle empty repository - create an empty local repo with remote
+	if strings.Contains(errStr, "empty") || strings.Contains(errStr, "repository is empty") {
+		androidLog("go_git_dart", "Clone: remote repository is empty, creating empty local repo")
+		os.RemoveAll(directory)
+
+		repo, err := git.PlainInit(directory, false)
+		if err != nil {
+			return fmt.Errorf("PlainInit failed for empty repo: %w", err)
+		}
+
+		_, err = repo.CreateRemote(&config.RemoteConfig{
+			Name: "origin",
+			URLs: []string{url},
+		})
+		if err != nil {
+			return fmt.Errorf("CreateRemote failed for empty repo: %w", err)
+		}
+
+		_ = setCoreFileModeFalse(directory)
+		androidLog("go_git_dart", "Clone: empty repository cloned successfully")
+		return nil
+	}
+
 	isModeError := strings.Contains(errStr, "malformed") ||
 		strings.Contains(errStr, "mode") ||
 		strings.Contains(errStr, "filemode") ||
