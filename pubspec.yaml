@@ -17,4 +17,4 @@ flutter:
     platforms:
       android:
         package: io.gitjournal.go_git_dart
-        pluginClass: GoGitDartPlugin
+        pluginClass: GoGitDartFlutterLibsPlugin
