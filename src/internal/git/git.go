@@ -384,6 +384,21 @@ func Push(remote string, directory string, privateKey []byte, password string) e
 		return err
 	}
 
+	// Set pack.window=0 to disable delta compression.
+	// Some git servers (especially gitee) have issues unpacking delta-compressed
+	// packs from go-git. Disabling deltas makes the pack larger but more compatible.
+	cfg, err := r.Config()
+	if err != nil {
+		logMsg("Push: Config failed: " + err.Error())
+		return err
+	}
+	cfg.Pack.Window = 0
+	if err := r.SetConfig(cfg); err != nil {
+		logMsg("Push: SetConfig failed: " + err.Error())
+		return err
+	}
+	logMsg("Push: set pack.window=0 (no delta compression)")
+
 	// Try push with retry for unpack errors
 	var lastErr error
 	for i := 0; i < 3; i++ {
