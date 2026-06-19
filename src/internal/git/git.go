@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
@@ -320,19 +321,49 @@ func pull(
 }
 
 func Push(remote string, directory string, privateKey []byte, password string) error {
+	logMsg("Push: opening repo at " + directory)
 	r, err := git.PlainOpen(directory)
 	if err != nil {
+		logMsg("Push: PlainOpen failed: " + err.Error())
 		return err
 	}
+	logMsg("Push: building auth for remote " + remote)
 	auth, err := buildAuthForRemote(r, remote, privateKey, password)
 	if err != nil {
+		logMsg("Push: buildAuthForRemote failed: " + err.Error())
 		return err
 	}
-	err = r.Push(&git.PushOptions{RemoteName: remote, Auth: auth})
-	if err == git.NoErrAlreadyUpToDate {
-		return nil
+
+	// Try push with retry for unpack errors
+	var lastErr error
+	for i := 0; i < 3; i++ {
+		if i > 0 {
+			logMsg("Push: retrying push (attempt " + string(rune('0'+i)) + "/3) after unpack error...")
+		}
+		logMsg("Push: pushing to remote " + remote)
+		err = r.Push(&git.PushOptions{RemoteName: remote, Auth: auth})
+		if err == nil {
+			logMsg("Push: push succeeded")
+			return nil
+		}
+		if err == git.NoErrAlreadyUpToDate {
+			logMsg("Push: already up to date")
+			return nil
+		}
+		lastErr = err
+		errStr := err.Error()
+		logMsg("Push: push failed: " + errStr)
+		// Only retry on unpack errors
+		if !strings.Contains(errStr, "unpack") && !strings.Contains(errStr, "abnormal") {
+			logMsg("Push: error is not unpack-related, not retrying")
+			break
+		}
+		if i < 2 {
+			logMsg("Push: waiting 2 seconds before retry...")
+				time.Sleep(2 * time.Second)
+		}
 	}
-	return err
+	return lastErr
 }
 
 func DefaultBranch(remoteUrl string, privateKey []byte, password string) (string, error) {
