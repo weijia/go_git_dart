@@ -158,6 +158,19 @@ func GitMergeCurrentBranch(directory *C.char) *C.char {
 	return nil
 }
 
+//export GitFixIndex
+func GitFixIndex(directory *C.char) *C.char {
+	fmt.Fprintf(os.Stderr, "[go_git_dart] GitFixIndex called: dir=%s\n", C.GoString(directory))
+	err := git.FixIndex(C.GoString(directory))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[go_git_dart] GitFixIndex error: %v\n", err)
+		return C.CString(err.Error())
+	}
+
+	fmt.Fprintf(os.Stderr, "[go_git_dart] GitFixIndex success\n")
+	return nil
+}
+
 //export GJGenerateRSAKeys
 func GJGenerateRSAKeys(publicKey **C.char, privateKey **C.char) *C.char {
 	fmt.Fprintf(os.Stderr, "[go_git_dart] GJGenerateRSAKeys called\n")

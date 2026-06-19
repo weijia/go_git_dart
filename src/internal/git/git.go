@@ -12,6 +12,7 @@ import (
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/format/index"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
@@ -23,6 +24,24 @@ import (
 
 func logMsg(msg string) {
 	fmt.Fprintf(os.Stderr, "[go_git_dart] %s\n", msg)
+}
+
+// normalizeFileMode converts non-standard file modes to standard git modes.
+// Some git servers (especially gitee) store files with modes like 0100600
+// which are not valid git file modes and cause "unpack error" on push.
+func normalizeFileMode(mode filemode.FileMode) filemode.FileMode {
+	switch {
+	case mode == 0120000:
+		return 0120000 // symlink
+	case mode == 0160000:
+		return 0160000 // submodule
+	case mode&0140000 != 0:
+		// Any kind of regular file - normalize to 0100644 (regular file, 644 perms)
+		// This covers: 0100644, 0100664, 0100755, 0100600, etc.
+		return 0100644
+	default:
+		return mode
+	}
 }
 
 func buildAuth(url string, privateKey []byte, password string) (transport.AuthMethod, error) {
@@ -239,7 +258,7 @@ func Clone(url string, directory string, privateKey []byte, password string) err
 		idx.Entries = append(idx.Entries, &index.Entry{
 			Name: f.Name,
 			Hash: f.Hash,
-			Mode: f.Mode,
+			Mode: normalizeFileMode(f.Mode),
 		})
 
 		return nil
@@ -289,7 +308,20 @@ func buildAuthForRemote(repo *git.Repository, remoteName string, privateKey []by
 func Fetch(remote string, directory string, privateKey []byte, password string) error {
 	r, err := git.PlainOpen(directory)
 	if err != nil {
-		return err
+		// Check if this is a malformed mode error on the index
+		errStr := err.Error()
+		if strings.Contains(errStr, "malformed") || strings.Contains(errStr, "mode") {
+			logMsg("Fetch: detected malformed mode in index, attempting to fix...")
+			if fixErr := FixIndex(directory); fixErr != nil {
+				return fmt.Errorf("index corrupted and fix failed: %w (original: %v)", fixErr, err)
+			}
+			r, err = git.PlainOpen(directory)
+			if err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
 	}
 	auth, err := buildAuthForRemote(r, remote, privateKey, password)
 	if err != nil {
@@ -325,7 +357,25 @@ func Push(remote string, directory string, privateKey []byte, password string) e
 	r, err := git.PlainOpen(directory)
 	if err != nil {
 		logMsg("Push: PlainOpen failed: " + err.Error())
-		return err
+
+		// Check if this is a malformed mode error on the index
+		errStr := err.Error()
+		if strings.Contains(errStr, "malformed") || strings.Contains(errStr, "mode") {
+			logMsg("Push: detected malformed mode in index, attempting to fix...")
+			if fixErr := FixIndex(directory); fixErr != nil {
+				logMsg("Push: FixIndex failed: " + fixErr.Error())
+				return fmt.Errorf("index corrupted and fix failed: %w (original: %v)", fixErr, err)
+			}
+			logMsg("Push: index fixed, retrying PlainOpen...")
+			r, err = git.PlainOpen(directory)
+			if err != nil {
+				logMsg("Push: PlainOpen still failed after fix: " + err.Error())
+				return err
+			}
+			logMsg("Push: PlainOpen succeeded after index fix")
+		} else {
+			return err
+		}
 	}
 	logMsg("Push: building auth for remote " + remote)
 	auth, err := buildAuthForRemote(r, remote, privateKey, password)
@@ -357,6 +407,33 @@ func Push(remote string, directory string, privateKey []byte, password string) e
 		if !strings.Contains(errStr, "unpack") && !strings.Contains(errStr, "abnormal") {
 			logMsg("Push: error is not unpack-related, not retrying")
 			break
+		}
+		// On first unpack failure, normalize index modes and amend last commit
+		if i == 0 {
+			logMsg("Push: unpack error detected, normalizing index and amending last commit...")
+			if fixErr := FixIndex(directory); fixErr != nil {
+				logMsg("Push: FixIndex failed: " + fixErr.Error())
+			} else {
+				// Amend the last commit to rebuild tree objects with normalized modes
+				if amendErr := amendLastCommit(directory); amendErr != nil {
+					logMsg("Push: amendLastCommit failed: " + amendErr.Error())
+				} else {
+					logMsg("Push: commit amended with normalized modes")
+				}
+				// Re-open repo after fix
+				r.Close()
+				r, err = git.PlainOpen(directory)
+				if err != nil {
+					logMsg("Push: failed to reopen repo after FixIndex: " + err.Error())
+					break
+				}
+				// Re-build auth since we have a new repo handle
+				auth, err = buildAuthForRemote(r, remote, privateKey, password)
+				if err != nil {
+					logMsg("Push: buildAuthForRemote failed after FixIndex: " + err.Error())
+					break
+				}
+			}
 		}
 		if i < 2 {
 			logMsg("Push: waiting 2 seconds before retry...")
@@ -395,7 +472,11 @@ func Add(directory string, path string) error {
 		return err
 	}
 	_, err = w.Add(path)
-	return err
+	if err != nil {
+		return err
+	}
+	// Normalize file modes in index to prevent unpack errors on push
+	return normalizeIndexModes(directory)
 }
 
 func Remove(directory string, path string) error {
@@ -404,6 +485,62 @@ func Remove(directory string, path string) error {
 		return err
 	}
 	_, err = w.Remove(path)
+	return err
+}
+
+// normalizeIndexModes walks through all index entries and normalizes non-standard
+// file modes to prevent unpack errors when pushing to remote servers.
+func normalizeIndexModes(directory string) error {
+	r, err := git.PlainOpen(directory)
+	if err != nil {
+		return err
+	}
+	idx, err := r.Storer.Index()
+	if err != nil {
+		return err
+	}
+	changed := false
+	for _, entry := range idx.Entries {
+		newMode := normalizeFileMode(entry.Mode)
+		if newMode != entry.Mode {
+			entry.Mode = newMode
+			changed = true
+		}
+	}
+	if changed {
+		return r.Storer.SetIndex(idx)
+	}
+	return nil
+}
+
+// amendLastCommit amends the last commit with the current index,
+// rebuilding tree objects with normalized file modes.
+func amendLastCommit(directory string) error {
+	r, err := git.PlainOpen(directory)
+	if err != nil {
+		return fmt.Errorf("PlainOpen: %w", err)
+	}
+
+	headRef, err := r.Head()
+	if err != nil {
+		return fmt.Errorf("Head: %w", err)
+	}
+
+	lastCommit, err := r.CommitObject(headRef.Hash())
+	if err != nil {
+		return fmt.Errorf("CommitObject: %w", err)
+	}
+
+	w, err := r.Worktree()
+	if err != nil {
+		return fmt.Errorf("Worktree: %w", err)
+	}
+
+	_, err = w.Commit(lastCommit.Message, &git.CommitOptions{
+		Author:    &lastCommit.Author,
+		Committer: &lastCommit.Committer,
+		Parents:   lastCommit.ParentHashes,
+	})
 	return err
 }
 
@@ -449,13 +586,89 @@ func Checkout(directory string, branch string) error {
 	return w.Checkout(&git.CheckoutOptions{Branch: branchRef})
 }
 
+// FixIndex rebuilds the git index from HEAD to fix malformed mode issues
+func FixIndex(directory string) error {
+	logMsg("FixIndex: attempting to fix index in " + directory)
+
+	r, err := git.PlainOpen(directory)
+	if err != nil {
+		return fmt.Errorf("PlainOpen failed: %w", err)
+	}
+
+	headRef, err := r.Head()
+	if err != nil {
+		return fmt.Errorf("Head failed: %w", err)
+	}
+
+	commitObj, err := r.CommitObject(headRef.Hash())
+	if err != nil {
+		return fmt.Errorf("CommitObject failed: %w", err)
+	}
+
+	tree, err := commitObj.Tree()
+	if err != nil {
+		return fmt.Errorf("Tree failed: %w", err)
+	}
+
+	idx, err := r.Storer.Index()
+	if err != nil {
+		return fmt.Errorf("Index failed: %w", err)
+	}
+	idx.Entries = make([]*index.Entry, 0)
+
+	err = tree.Files().ForEach(func(f *object.File) error {
+		idx.Entries = append(idx.Entries, &index.Entry{
+			Name: f.Name,
+			Hash: f.Hash,
+			Mode: normalizeFileMode(f.Mode),
+		})
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("file iteration failed: %w", err)
+	}
+
+	if err := r.Storer.SetIndex(idx); err != nil {
+		return fmt.Errorf("SetIndex failed: %w", err)
+	}
+
+	// Also set core.fileMode=false to prevent future issues
+	_ = setCoreFileModeFalse(directory)
+
+	logMsg("FixIndex: index rebuilt successfully")
+	return nil
+}
+
+// plainOpenWithFix attempts to open a repo, and if it fails due to malformed mode,
+// tries to rebuild the index from HEAD and retry.
+func plainOpenWithFix(directory string) (*git.Repository, error) {
+	r, err := git.PlainOpen(directory)
+	if err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "malformed") || strings.Contains(errStr, "mode") {
+			logMsg("plainOpenWithFix: detected malformed mode, attempting FixIndex...")
+			if fixErr := FixIndex(directory); fixErr != nil {
+				return nil, fmt.Errorf("index corrupted and fix failed: %w (original: %v)", fixErr, err)
+			}
+			r, err = git.PlainOpen(directory)
+			if err != nil {
+				return nil, err
+			}
+			logMsg("plainOpenWithFix: succeeded after FixIndex")
+		} else {
+			return nil, err
+		}
+	}
+	return r, nil
+}
+
 func openWorktree(directory string) (*git.Worktree, error) {
 	_, w, err := openRepositoryAndWorktree(directory)
 	return w, err
 }
 
 func openRepositoryAndWorktree(directory string) (*git.Repository, *git.Worktree, error) {
-	r, err := git.PlainOpen(directory)
+	r, err := plainOpenWithFix(directory)
 	if err != nil {
 		return nil, nil, err
 	}
