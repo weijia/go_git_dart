@@ -384,6 +384,18 @@ func Push(remote string, directory string, privateKey []byte, password string) e
 		return err
 	}
 
+	// Log diagnostic info
+	headRef, err := r.Head()
+	if err != nil {
+		logMsg("Push: failed to get HEAD: " + err.Error())
+	} else {
+		logMsg("Push: HEAD=" + headRef.String())
+	}
+	rem, err := r.Remote(remote)
+	if err == nil {
+		logMsg("Push: remote URLs=" + fmt.Sprintf("%v", rem.Config().URLs))
+	}
+
 	// Set pack.window=0 to disable delta compression.
 	// Some git servers (especially gitee) have issues unpacking delta-compressed
 	// packs from go-git. Disabling deltas makes the pack larger but more compatible.
