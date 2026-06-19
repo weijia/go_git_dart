@@ -421,7 +421,6 @@ func Push(remote string, directory string, privateKey []byte, password string) e
 					logMsg("Push: commit amended with normalized modes")
 				}
 				// Re-open repo after fix
-				r.Close()
 				r, err = git.PlainOpen(directory)
 				if err != nil {
 					logMsg("Push: failed to reopen repo after FixIndex: " + err.Error())
