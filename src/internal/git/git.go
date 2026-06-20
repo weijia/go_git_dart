@@ -453,7 +453,7 @@ func Push(remote string, directory string, privateKey []byte, password string) e
 				if err := w.AddWithOptions(&git.AddOptions{All: true}); err != nil {
 					logMsg("Push: AddWithOptions failed: " + err.Error())
 				} else {
-					commitErr := w.Commit("Auto-commit after repo health fix", &git.CommitOptions{
+					_, commitErr := w.Commit("Auto-commit after repo health fix", &git.CommitOptions{
 						Author: &object.Signature{
 							Name:  "GitJournal",
 							Email: "app@gitjournal.io",
