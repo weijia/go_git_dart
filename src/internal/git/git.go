@@ -787,10 +787,7 @@ func RebuildHistory(directory string) error {
 		}
 
 		// Encode the commit into an EncodedObject for storage
-		encodedObj, err := r.Storer.NewEncodedObject()
-		if err != nil {
-			return fmt.Errorf("new encoded object: %w", err)
-		}
+		encodedObj := r.Storer.NewEncodedObject()
 		if err := newCommit.Encode(encodedObj); err != nil {
 			return fmt.Errorf("encode commit: %w", err)
 		}
@@ -867,10 +864,7 @@ func rebuildTree(r *git.Repository, treeHash plumbing.Hash, treeMap map[plumbing
 	newTree := &object.Tree{Entries: entries}
 
 	// Encode the tree into an EncodedObject for storage
-	encodedObj, err := r.Storer.NewEncodedObject()
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("new encoded object: %w", err)
-	}
+	encodedObj := r.Storer.NewEncodedObject()
 	if err := newTree.Encode(encodedObj); err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("encode tree: %w", err)
 	}
