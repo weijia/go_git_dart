@@ -412,6 +412,80 @@ func Push(remote string, directory string, privateKey []byte, password string) e
 	}
 	logMsg("Push: set pack.window=0 (no delta compression)")
 
+	// Check repo health before first push attempt
+	if healthy, issues := CheckRepoHealth(directory); !healthy {
+		logMsg("Push: repo has issues: " + issues)
+		logMsg("Push: attempting auto-fix by resetting to remote and re-committing...")
+
+		// Step 1: Soft reset to remote (keeps working directory changes)
+		if resetErr := ResetSoftToRemote(directory, remote); resetErr != nil {
+			logMsg("Push: ResetSoftToRemote failed: " + resetErr.Error())
+			logMsg("Push: falling back to RebuildHistory...")
+			if rebuildErr := RebuildHistory(directory); rebuildErr != nil {
+				logMsg("Push: RebuildHistory failed: " + rebuildErr.Error())
+			}
+		} else {
+			logMsg("Push: reset to remote successfully, working directory preserved")
+		}
+
+		// Re-open repo after reset
+		r, err = git.PlainOpen(directory)
+		if err != nil {
+			logMsg("Push: failed to reopen repo after reset: " + err.Error())
+			return err
+		}
+
+		// Re-build auth with new repo handle
+		auth, err = buildAuthForRemote(r, remote, privateKey, password)
+		if err != nil {
+			logMsg("Push: buildAuthForRemote failed after reset: " + err.Error())
+			return err
+		}
+
+		// Step 2: Try to commit any staged/working directory changes
+		w, err := r.Worktree()
+		if err != nil {
+			logMsg("Push: Worktree failed: " + err.Error())
+		} else {
+			status, err := w.Status()
+			if err == nil && !status.IsClean() {
+				logMsg("Push: committing working directory changes...")
+				if err := w.AddWithOptions(&git.AddOptions{All: true}); err != nil {
+					logMsg("Push: AddWithOptions failed: " + err.Error())
+				} else {
+					commitErr := w.Commit("Auto-commit after repo health fix", &git.CommitOptions{
+						Author: &object.Signature{
+							Name:  "GitJournal",
+							Email: "app@gitjournal.io",
+							When:  time.Now(),
+						},
+					})
+					if commitErr != nil {
+						logMsg("Push: Commit failed: " + commitErr.Error())
+					} else {
+						logMsg("Push: committed working directory changes")
+					}
+				}
+			} else {
+				logMsg("Push: working directory is clean, no changes to commit")
+			}
+		}
+
+		// Re-open repo after commit
+		r, err = git.PlainOpen(directory)
+		if err != nil {
+			logMsg("Push: failed to reopen repo after commit: " + err.Error())
+			return err
+		}
+		auth, err = buildAuthForRemote(r, remote, privateKey, password)
+		if err != nil {
+			logMsg("Push: buildAuthForRemote failed after commit: " + err.Error())
+			return err
+		}
+	} else {
+		logMsg("Push: repo health check passed")
+	}
+
 	// Try push with retry for unpack errors
 	var lastErr error
 	for i := 0; i < 3; i++ {
@@ -435,38 +509,6 @@ func Push(remote string, directory string, privateKey []byte, password string) e
 		if !strings.Contains(errStr, "unpack") && !strings.Contains(errStr, "abnormal") {
 			logMsg("Push: error is not unpack-related, not retrying")
 			break
-		}
-		// On first unpack failure, try RebuildHistory to fix all tree objects
-		if i == 0 {
-			logMsg("Push: unpack error detected, attempting to rebuild history...")
-			if rebuildErr := RebuildHistory(directory); rebuildErr != nil {
-				logMsg("Push: RebuildHistory failed: " + rebuildErr.Error())
-				// Fall back to FixIndex + amendLastCommit
-				logMsg("Push: falling back to FixIndex + amendLastCommit...")
-				if fixErr := FixIndex(directory); fixErr != nil {
-					logMsg("Push: FixIndex failed: " + fixErr.Error())
-				} else {
-					if amendErr := amendLastCommit(directory); amendErr != nil {
-						logMsg("Push: amendLastCommit failed: " + amendErr.Error())
-					} else {
-						logMsg("Push: commit amended with normalized modes")
-					}
-				}
-			} else {
-				logMsg("Push: history rebuilt successfully")
-			}
-			// Re-open repo after fix
-			r, err = git.PlainOpen(directory)
-			if err != nil {
-				logMsg("Push: failed to reopen repo after rebuild: " + err.Error())
-				break
-			}
-			// Re-build auth since we have a new repo handle
-			auth, err = buildAuthForRemote(r, remote, privateKey, password)
-			if err != nil {
-				logMsg("Push: buildAuthForRemote failed after rebuild: " + err.Error())
-				break
-			}
 		}
 		if i < 2 {
 			logMsg("Push: waiting 2 seconds before retry...")
@@ -617,6 +659,112 @@ func Checkout(directory string, branch string) error {
 		return err
 	}
 	return w.Checkout(&git.CheckoutOptions{Branch: branchRef})
+}
+
+// CheckRepoHealth runs git fsck to check for corrupted objects.
+// Returns true if the repo is healthy, false if there are errors.
+func CheckRepoHealth(directory string) (bool, string) {
+	logMsg("CheckRepoHealth: checking " + directory)
+
+	r, err := git.PlainOpen(directory)
+	if err != nil {
+		return false, fmt.Sprintf("PlainOpen failed: %v", err)
+	}
+
+	// Get HEAD commit
+	headRef, err := r.Head()
+	if err != nil {
+		return false, fmt.Sprintf("Head failed: %v", err)
+	}
+
+	// Walk all objects reachable from HEAD
+	commitIter, err := r.Log(&git.LogOptions{From: headRef.Hash()})
+	if err != nil {
+		return false, fmt.Sprintf("Log failed: %v", err)
+	}
+	defer commitIter.Close()
+
+	var issues []string
+	for {
+		commit, err := commitIter.Next()
+		if err != nil {
+			break
+		}
+
+		// Check tree for each commit
+		tree, err := commit.Tree()
+		if err != nil {
+			issues = append(issues, fmt.Sprintf("commit %s: tree error: %v", commit.Hash.String()[:7], err))
+			continue
+		}
+
+		// Validate tree entries
+		for _, entry := range tree.Entries {
+			mode := entry.Mode
+			if mode != filemode.Regular && mode != filemode.Executable &&
+				mode != filemode.Symlink && mode != filemode.Dir && mode != filemode.Submodule {
+				issues = append(issues, fmt.Sprintf("commit %s: bad filemode %o in %s", commit.Hash.String()[:7], mode, entry.Name))
+			}
+		}
+
+		// Check tree sorting
+		for i := 1; i < len(tree.Entries); i++ {
+			prev := tree.Entries[i-1].Name
+			curr := tree.Entries[i].Name
+			if prev > curr {
+				issues = append(issues, fmt.Sprintf("commit %s: tree not sorted (%s > %s)", commit.Hash.String()[:7], prev, curr))
+			}
+		}
+	}
+
+	if len(issues) > 0 {
+		return false, strings.Join(issues, "; ")
+	}
+	return true, ""
+}
+
+// ResetSoftToRemote resets local branch to match remote branch,
+// keeping working directory changes intact.
+func ResetSoftToRemote(directory string, remote string) error {
+	logMsg("ResetSoftToRemote: resetting to remote " + remote)
+
+	r, w, err := openRepositoryAndWorktree(directory)
+	if err != nil {
+		return err
+	}
+
+	// Get current branch
+	headRef, err := r.Head()
+	if err != nil {
+		return fmt.Errorf("Head: %w", err)
+	}
+	branchName := headRef.Name().Short()
+	logMsg("ResetSoftToRemote: current branch: " + branchName)
+
+	// Get remote branch ref
+	remoteRefName := plumbing.NewRemoteReferenceName(remote, branchName)
+	remoteRef, err := r.Reference(remoteRefName, true)
+	if err != nil {
+		return fmt.Errorf("remote ref not found: %w", err)
+	}
+	logMsg("ResetSoftToRemote: remote ref: " + remoteRef.Hash().String())
+
+	// Soft reset to remote commit (keeps working directory)
+	if err := w.Reset(&git.ResetOptions{
+		Commit: remoteRef.Hash(),
+		Mode:   git.SoftReset,
+	}); err != nil {
+		return fmt.Errorf("soft reset: %w", err)
+	}
+
+	// Update local branch ref to point to remote commit
+	localRef := plumbing.NewHashReference(headRef.Name(), remoteRef.Hash())
+	if err := r.Storer.SetReference(localRef); err != nil {
+		return fmt.Errorf("update local ref: %w", err)
+	}
+
+	logMsg("ResetSoftToRemote: successfully reset to remote")
+	return nil
 }
 
 // FixIndex rebuilds the git index from HEAD to fix malformed mode issues

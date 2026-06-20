@@ -184,6 +184,32 @@ func GitRebuildHistory(directory *C.char) *C.char {
 	return nil
 }
 
+//export GitCheckRepoHealth
+func GitCheckRepoHealth(directory *C.char, issues **C.char) C.int {
+	fmt.Fprintf(os.Stderr, "[go_git_dart] GitCheckRepoHealth called: dir=%s\n", C.GoString(directory))
+	healthy, issuesStr := git.CheckRepoHealth(C.GoString(directory))
+	if !healthy {
+		*issues = C.CString(issuesStr)
+		fmt.Fprintf(os.Stderr, "[go_git_dart] GitCheckRepoHealth: unhealthy - %s\n", issuesStr)
+		return 0
+	}
+	fmt.Fprintf(os.Stderr, "[go_git_dart] GitCheckRepoHealth: healthy\n")
+	return 1
+}
+
+//export GitResetSoftToRemote
+func GitResetSoftToRemote(directory *C.char, remote *C.char) *C.char {
+	fmt.Fprintf(os.Stderr, "[go_git_dart] GitResetSoftToRemote called: dir=%s remote=%s\n", C.GoString(directory), C.GoString(remote))
+	err := git.ResetSoftToRemote(C.GoString(directory), C.GoString(remote))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[go_git_dart] GitResetSoftToRemote error: %v\n", err)
+		return C.CString(err.Error())
+	}
+
+	fmt.Fprintf(os.Stderr, "[go_git_dart] GitResetSoftToRemote success\n")
+	return nil
+}
+
 //export GJGenerateRSAKeys
 func GJGenerateRSAKeys(publicKey **C.char, privateKey **C.char) *C.char {
 	fmt.Fprintf(os.Stderr, "[go_git_dart] GJGenerateRSAKeys called\n")
