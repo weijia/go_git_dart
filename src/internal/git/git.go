@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -435,35 +436,41 @@ func Push(remote string, directory string, privateKey []byte, password string) e
 			logMsg("Push: error is not unpack-related, not retrying")
 			break
 		}
-		// On first unpack failure, normalize index modes and amend last commit
+		// On first unpack failure, try RebuildHistory to fix all tree objects
 		if i == 0 {
-			logMsg("Push: unpack error detected, normalizing index and amending last commit...")
-			if fixErr := FixIndex(directory); fixErr != nil {
-				logMsg("Push: FixIndex failed: " + fixErr.Error())
-			} else {
-				// Amend the last commit to rebuild tree objects with normalized modes
-				if amendErr := amendLastCommit(directory); amendErr != nil {
-					logMsg("Push: amendLastCommit failed: " + amendErr.Error())
+			logMsg("Push: unpack error detected, attempting to rebuild history...")
+			if rebuildErr := RebuildHistory(directory); rebuildErr != nil {
+				logMsg("Push: RebuildHistory failed: " + rebuildErr.Error())
+				// Fall back to FixIndex + amendLastCommit
+				logMsg("Push: falling back to FixIndex + amendLastCommit...")
+				if fixErr := FixIndex(directory); fixErr != nil {
+					logMsg("Push: FixIndex failed: " + fixErr.Error())
 				} else {
-					logMsg("Push: commit amended with normalized modes")
+					if amendErr := amendLastCommit(directory); amendErr != nil {
+						logMsg("Push: amendLastCommit failed: " + amendErr.Error())
+					} else {
+						logMsg("Push: commit amended with normalized modes")
+					}
 				}
-				// Re-open repo after fix
-				r, err = git.PlainOpen(directory)
-				if err != nil {
-					logMsg("Push: failed to reopen repo after FixIndex: " + err.Error())
-					break
-				}
-				// Re-build auth since we have a new repo handle
-				auth, err = buildAuthForRemote(r, remote, privateKey, password)
-				if err != nil {
-					logMsg("Push: buildAuthForRemote failed after FixIndex: " + err.Error())
-					break
-				}
+			} else {
+				logMsg("Push: history rebuilt successfully")
+			}
+			// Re-open repo after fix
+			r, err = git.PlainOpen(directory)
+			if err != nil {
+				logMsg("Push: failed to reopen repo after rebuild: " + err.Error())
+				break
+			}
+			// Re-build auth since we have a new repo handle
+			auth, err = buildAuthForRemote(r, remote, privateKey, password)
+			if err != nil {
+				logMsg("Push: buildAuthForRemote failed after rebuild: " + err.Error())
+				break
 			}
 		}
 		if i < 2 {
 			logMsg("Push: waiting 2 seconds before retry...")
-				time.Sleep(2 * time.Second)
+			time.Sleep(2 * time.Second)
 		}
 	}
 	return lastErr
@@ -691,6 +698,172 @@ func plainOpenWithFix(directory string) (*git.Repository, error) {
 func openWorktree(directory string) (*git.Worktree, error) {
 	_, w, err := openRepositoryAndWorktree(directory)
 	return w, err
+}
+
+// RebuildHistory rebuilds all tree objects in the repository history,
+// normalizing file modes and ensuring entries are properly sorted.
+// This fixes badFilemode and treeNotSorted errors that cause
+// "unpack error: unpack-objects abnormal exit" on push.
+func RebuildHistory(directory string) error {
+	logMsg("RebuildHistory: starting history rebuild in " + directory)
+
+	r, err := git.PlainOpen(directory)
+	if err != nil {
+		return fmt.Errorf("PlainOpen: %w", err)
+	}
+
+	// Get all refs
+	refs, err := r.References()
+	if err != nil {
+		return fmt.Errorf("References: %w", err)
+	}
+
+	// Collect all commits that need rebuilding
+	commitMap := make(map[plumbing.Hash]*object.Commit)
+	commitOrder := []plumbing.Hash{}
+
+	err = refs.ForEach(func(ref *plumbing.Reference) error {
+		if ref.Type() != plumbing.HashReference {
+			return nil
+		}
+		// Walk the commit history from this ref
+		commitIter, err := r.Log(&git.LogOptions{From: ref.Hash()})
+		if err != nil {
+			return nil // skip refs that aren't commits
+		}
+		defer commitIter.Close()
+
+		for {
+			commit, err := commitIter.Next()
+			if err != nil {
+				break
+			}
+			if _, exists := commitMap[commit.Hash]; !exists {
+				commitMap[commit.Hash] = commit
+				commitOrder = append(commitOrder, commit.Hash)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("ref iteration: %w", err)
+	}
+
+	if len(commitOrder) == 0 {
+		logMsg("RebuildHistory: no commits found")
+		return nil
+	}
+
+	logMsg(fmt.Sprintf("RebuildHistory: found %d commits to rebuild", len(commitOrder)))
+
+	// Rebuild trees in reverse order (oldest first) to preserve parent references
+	// Actually we need to rebuild from oldest to newest so parent trees are already fixed
+	// But commitOrder is in discovery order, not chronological. Let's sort by commit time.
+	sort.Slice(commitOrder, func(i, j int) bool {
+		return commitMap[commitOrder[i]].Committer.When.Before(
+			commitMap[commitOrder[j]].Committer.When,
+		)
+	})
+
+	// Map old tree hashes to new tree hashes
+	treeMap := make(map[plumbing.Hash]plumbing.Hash)
+
+	for _, hash := range commitOrder {
+		commit := commitMap[hash]
+		newTreeHash, err := rebuildTree(r, commit.TreeHash, treeMap)
+		if err != nil {
+			return fmt.Errorf("rebuild tree for commit %s: %w", hash.String(), err)
+		}
+
+		// Create new commit with fixed tree
+		newCommit := &object.Commit{
+			Author:       commit.Author,
+			Committer:    commit.Committer,
+			Message:      commit.Message,
+			TreeHash:     newTreeHash,
+			ParentHashes: commit.ParentHashes,
+			PGPSignature: commit.PGPSignature,
+			Encoding:     commit.Encoding,
+		}
+
+		newHash, err := r.Storer.SetEncodedObject(newCommit)
+		if err != nil {
+			return fmt.Errorf("store commit: %w", err)
+		}
+
+		// Update tree map for this commit (in case it's referenced as a parent)
+		treeMap[hash] = newHash
+		logMsg(fmt.Sprintf("RebuildHistory: rebuilt commit %s -> %s", hash.String()[:7], newHash.String()[:7]))
+	}
+
+	// Update all refs to point to new commits
+	refs, err = r.References()
+	if err != nil {
+		return fmt.Errorf("References second pass: %w", err)
+	}
+
+	err = refs.ForEach(func(ref *plumbing.Reference) error {
+		if ref.Type() != plumbing.HashReference {
+			return nil
+		}
+		if newHash, ok := treeMap[ref.Hash()]; ok {
+			newRef := plumbing.NewHashReference(ref.Name(), newHash)
+			return r.Storer.SetReference(newRef)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("update refs: %w", err)
+	}
+
+	logMsg("RebuildHistory: history rebuild complete")
+	return nil
+}
+
+// rebuildTree recursively rebuilds a tree object, normalizing file modes
+// and ensuring entries are sorted by name.
+func rebuildTree(r *git.Repository, treeHash plumbing.Hash, treeMap map[plumbing.Hash]plumbing.Hash) (plumbing.Hash, error) {
+	if newHash, ok := treeMap[treeHash]; ok {
+		return newHash, nil
+	}
+
+	tree, err := r.TreeObject(treeHash)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("TreeObject: %w", err)
+	}
+
+	// Rebuild entries: normalize modes and recursively fix subtrees
+	entries := make([]object.TreeEntry, len(tree.Entries))
+	for i, entry := range tree.Entries {
+		entries[i] = object.TreeEntry{
+			Name: entry.Name,
+			Mode: normalizeFileMode(entry.Mode),
+			Hash: entry.Hash,
+		}
+
+		// If this is a directory, recursively rebuild it
+		if entry.Mode == filemode.Dir {
+			newSubHash, err := rebuildTree(r, entry.Hash, treeMap)
+			if err != nil {
+				return plumbing.ZeroHash, fmt.Errorf("rebuild subtree %s: %w", entry.Name, err)
+			}
+			entries[i].Hash = newSubHash
+		}
+	}
+
+	// Sort entries by name (required for valid tree objects)
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name < entries[j].Name
+	})
+
+	newTree := &object.Tree{Entries: entries}
+	newHash, err := r.Storer.SetEncodedObject(newTree)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("store tree: %w", err)
+	}
+
+	treeMap[treeHash] = newHash
+	return newHash, nil
 }
 
 func openRepositoryAndWorktree(directory string) (*git.Repository, *git.Worktree, error) {

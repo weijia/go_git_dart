@@ -171,6 +171,19 @@ func GitFixIndex(directory *C.char) *C.char {
 	return nil
 }
 
+//export GitRebuildHistory
+func GitRebuildHistory(directory *C.char) *C.char {
+	fmt.Fprintf(os.Stderr, "[go_git_dart] GitRebuildHistory called: dir=%s\n", C.GoString(directory))
+	err := git.RebuildHistory(C.GoString(directory))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[go_git_dart] GitRebuildHistory error: %v\n", err)
+		return C.CString(err.Error())
+	}
+
+	fmt.Fprintf(os.Stderr, "[go_git_dart] GitRebuildHistory success\n")
+	return nil
+}
+
 //export GJGenerateRSAKeys
 func GJGenerateRSAKeys(publicKey **C.char, privateKey **C.char) *C.char {
 	fmt.Fprintf(os.Stderr, "[go_git_dart] GJGenerateRSAKeys called\n")
